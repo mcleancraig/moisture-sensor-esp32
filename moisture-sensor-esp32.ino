@@ -1,73 +1,353 @@
 #include <WiFi.h>
-#include <secrets.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
 #include <PubSubClient.h>
+#include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
-//  CONFIG — only edit these for each sensor unit
+//  v2.0.0 — captive portal config on first boot
+//  All settings stored in NVS via Preferences library
+//  No secrets.h or hardcoded config needed
 // ═══════════════════════════════════════════════════════════
 
-// ── Single number that configures this unit ───────────────
-const int SENSOR_NUMBER = 2;  // ← change this only, everything derives from it
+// ── Pins ─────────────────────────────────────────────────
+const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
+const int BATTERY_PIN  = 1;   // A1 — voltage divider midpoint
 
-// WiFi
-const char* WIFI_SSID       = S_WIFI_SSID;
-const char* WIFI_PASSWORD   = S_WIFI_PASSWORD;
+// ── Fixed calibration (adjust per sensor) ────────────────
+const int   DRY_MV         = 2800;
+const int   WET_MV         = 1000;
+const float DIVIDER_RATIO  = 2.0;
+const float BAT_CAL_OFFSET = 0.0;
+const float BAT_MIN        = 2.5;
+const float BAT_MAX        = 4.3;
 
-IPAddress GATEWAY  (192, 168,  1,   1);
-IPAddress SUBNET   (255, 255, 0,   0);
-IPAddress DNS      (192, 168,  1,   1);
+// ── Deep sleep ────────────────────────────────────────────
+const int SLEEP_MINUTES    = 15;
 
-// MQTT
-const char* MQTT_BROKER     = "192.168.11.1";
-const int   MQTT_PORT       = 1883;
-const char* MQTT_USER       = S_MQTT_USER;
-const char* MQTT_PASSWORD   = S_MQTT_PASSWORD;
+// ── AP config portal timing ───────────────────────────────
+const int AP_TIMEOUT_MIN   = 10;
+const int AP_SLEEP_MIN     = 10;
 
-// Moisture calibration — recalibrate per sensor
-const int   DRY_MV          = 2800;
-const int   WET_MV          = 1000;
-                                       // HW-390 inverted: dry > wet
-
-// Battery
-const int   BATTERY_PIN     = 1;
-const float DIVIDER_RATIO   = 2;
-const float BAT_CAL_OFFSET  = 0.0;
-const float BAT_MIN         = 2;
-const float BAT_MAX         = 5;
-
-// Pins
-const int   MOISTURE_PIN    = 0;
-
-// Deep sleep
-const int   SLEEP_MINUTES   = 1;
-
-// HA autodiscovery prefix
+// ── HA discovery prefix ───────────────────────────────────
 const char* HA_DISCOVERY_PREFIX = "homeassistant";
 
 // ═══════════════════════════════════════════════════════════
-//  DERIVED CONFIG — do not edit
+//  RUNTIME CONFIG — loaded from NVS
 // ═══════════════════════════════════════════════════════════
 
-// These are populated in setup() from SENSOR_NUMBER
+Preferences prefs;
+
+struct Config {
+  int   sensorNumber;
+  char  wifiSSID[64];
+  char  wifiPassword[64];
+  bool  staticIP;
+  uint8_t ip[4];        // full static IP, all four octets
+  char  mqttBroker[64];
+  int   mqttPort;
+  char  mqttUser[32];
+  char  mqttPassword[64];
+} cfg;
+
+bool configLoaded = false;
+
+void loadConfig() {
+  prefs.begin("sensor", true);
+  cfg.sensorNumber = prefs.getInt("sensorNum", 0);
+  prefs.getString("wifiSSID",   cfg.wifiSSID,    sizeof(cfg.wifiSSID));
+  prefs.getString("wifiPass",   cfg.wifiPassword,sizeof(cfg.wifiPassword));
+  cfg.staticIP  = prefs.getBool("staticIP", false);
+  cfg.ip[0]     = prefs.getUChar("ip0", 192);
+  cfg.ip[1]     = prefs.getUChar("ip1", 168);
+  cfg.ip[2]     = prefs.getUChar("ip2", 220);
+  cfg.ip[3]     = prefs.getUChar("ip3", 1);
+  prefs.getString("mqttBroker", cfg.mqttBroker,  sizeof(cfg.mqttBroker));
+  cfg.mqttPort  = prefs.getInt("mqttPort", 1883);
+  prefs.getString("mqttUser",   cfg.mqttUser,    sizeof(cfg.mqttUser));
+  prefs.getString("mqttPass",   cfg.mqttPassword,sizeof(cfg.mqttPassword));
+  prefs.end();
+
+  configLoaded = (cfg.sensorNumber > 0 && strlen(cfg.wifiSSID) > 0);
+}
+
+void saveConfig(int sensorNum,
+                const char* ssid, const char* wifiPass,
+                bool staticIp, uint8_t ip0, uint8_t ip1, uint8_t ip2, uint8_t ip3,
+                const char* broker, int port,
+                const char* user, const char* mqttPass) {
+  prefs.begin("sensor", false);
+  prefs.putInt("sensorNum",  sensorNum);
+  prefs.putString("wifiSSID",  ssid);
+  prefs.putString("wifiPass",  wifiPass);
+  prefs.putBool("staticIP",    staticIp);
+  prefs.putUChar("ip0",        ip0);
+  prefs.putUChar("ip1",        ip1);
+  prefs.putUChar("ip2",        ip2);
+  prefs.putUChar("ip3",        ip3);
+  prefs.putString("mqttBroker",broker);
+  prefs.putInt("mqttPort",     port);
+  prefs.putString("mqttUser",  user);
+  prefs.putString("mqttPass",  mqttPass);
+  prefs.end();
+  Serial.println("Config    — saved to NVS");
+}
+
+// ═══════════════════════════════════════════════════════════
+//  DERIVED TOPICS
+// ═══════════════════════════════════════════════════════════
+
 char SENSOR_ID[16];
 char SENSOR_NAME[32];
-IPAddress STATIC_IP;
-
-// State + discovery topics
 char STATE_TOPIC[64];
 char DISC_MOISTURE[128];
 char DISC_BAT_V[128];
 char DISC_BAT_PCT[128];
 
+void buildDerivedConfig() {
+  snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.sensorNumber);
+  snprintf(SENSOR_NAME, sizeof(SENSOR_NAME), "Garden Moisture Sensor %d", cfg.sensorNumber);
+  snprintf(STATE_TOPIC, sizeof(STATE_TOPIC), "garden/%s/state",           SENSOR_ID);
+  snprintf(DISC_MOISTURE, sizeof(DISC_MOISTURE),
+    "%s/sensor/%s_moisture/config",    HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_BAT_V,    sizeof(DISC_BAT_V),
+    "%s/sensor/%s_battery_v/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_BAT_PCT,  sizeof(DISC_BAT_PCT),
+    "%s/sensor/%s_battery_pct/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+}
+
 // ═══════════════════════════════════════════════════════════
-//  GLOBALS
+//  CAPTIVE PORTAL HTML
 // ═══════════════════════════════════════════════════════════
 
-WiFiClient   wifiClient;
-PubSubClient mqtt(wifiClient);
+WebServer server(80);
+DNSServer dnsServer;
+
+const char CONFIG_HTML[] PROGMEM = R"rawhtml(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Moisture Sensor Setup</title>
+<style>
+  body{font-family:sans-serif;max-width:420px;margin:40px auto;padding:0 16px;background:#f5f5f5}
+  h1{font-size:1.3em;color:#2c7a4b;margin-bottom:4px}
+  p.sub{color:#666;font-size:.85em;margin-top:0}
+  label{display:block;margin-top:14px;font-size:.9em;color:#333;font-weight:600}
+  input,select{width:100%;padding:8px;margin-top:4px;border:1px solid #ccc;
+    border-radius:6px;font-size:1em;box-sizing:border-box}
+  .optional{color:#888;font-weight:400;font-size:.8em}
+  .section{background:#fff;border-radius:10px;padding:16px;margin:16px 0;
+    box-shadow:0 1px 4px rgba(0,0,0,.08)}
+  button{width:100%;padding:12px;background:#2c7a4b;color:#fff;border:none;
+    border-radius:8px;font-size:1em;cursor:pointer;margin-top:20px}
+  button:hover{background:#215c38}
+  .hint{font-size:.78em;color:#888;margin-top:2px}
+  .ip-wrap{display:flex;gap:4px;margin-top:4px;align-items:center}
+  .ip-wrap input{width:60px;padding:8px;text-align:center;flex:none}
+  .ip-wrap span{color:#555;font-weight:700}
+  #ip-row{display:none;margin-top:10px}
+  .chk-row{display:flex;align-items:center;gap:8px;margin-top:14px}
+  .chk-row input{width:auto;margin:0}
+</style>
+</head>
+<body>
+<h1>Moisture Sensor Setup</h1>
+<p class="sub">Configure this sensor then click Save. It will restart and begin reporting.</p>
+
+<form method="POST" action="/save">
+
+  <div class="section">
+    <label>Sensor number
+      <input type="number" name="sensorNum" id="sensorNum" min="1" max="254"
+        value="1" required oninput="syncOctet()">
+    </label>
+    <p class="hint">Sets sensor ID, friendly name, and default last IP octet</p>
+  </div>
+
+  <div class="section">
+    <label>WiFi SSID
+      <input type="text" name="ssid" placeholder="Your network name" required>
+    </label>
+    <label>WiFi password <span class="optional">(optional)</span>
+      <input type="password" name="wifiPass"
+        placeholder="Leave blank for open networks">
+    </label>
+    <div class="chk-row">
+      <input type="checkbox" name="staticIP" id="staticChk"
+        onchange="toggleIP(this)">
+      <label for="staticChk" style="margin:0;font-weight:600">
+        Use static IP
+      </label>
+    </div>
+    <div id="ip-row">
+      <label>Static IP address</label>
+      <div class="ip-wrap">
+        <input type="number" name="ip1" id="ip1" value="192" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="ip2" id="ip2" value="168" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="ip3" id="ip3" value="220" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="ip4" id="ip4" min="1" max="254" value="1">
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <label>MQTT broker address
+      <input type="text" name="mqttBroker" placeholder="192.168.1.100" required>
+    </label>
+    <label>MQTT port
+      <input type="number" name="mqttPort" value="1883">
+    </label>
+    <label>MQTT username <span class="optional">(optional)</span>
+      <input type="text" name="mqttUser"
+        placeholder="Leave blank if not required">
+    </label>
+    <label>MQTT password <span class="optional">(optional)</span>
+      <input type="password" name="mqttPass"
+        placeholder="Leave blank if not required">
+    </label>
+  </div>
+
+  <button type="submit">Save &amp; Restart</button>
+</form>
+
+<script>
+function syncOctet() {
+  if (!document.getElementById('staticChk').checked) return;
+  document.getElementById('ip4').value =
+    document.getElementById('sensorNum').value;
+}
+function toggleIP(cb) {
+  document.getElementById('ip-row').style.display =
+    cb.checked ? 'block' : 'none';
+  if (cb.checked) {
+    document.getElementById('ip4').value =
+      document.getElementById('sensorNum').value;
+  }
+}
+</script>
+</body>
+</html>
+)rawhtml";
+
+const char SAVED_HTML[] PROGMEM = R"rawhtml(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Saved</title>
+<style>
+  body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:0 16px;
+    text-align:center;background:#f5f5f5}
+  h1{color:#2c7a4b}
+  p{color:#555}
+</style>
+</head>
+<body>
+<h1>Saved!</h1>
+<p>Configuration saved. The sensor will restart and connect to your network.</p>
+<p><small>You can close this page.</small></p>
+</body>
+</html>
+)rawhtml";
 
 // ═══════════════════════════════════════════════════════════
-//  FUNCTIONS
+//  PORTAL HANDLERS
+// ═══════════════════════════════════════════════════════════
+
+void handleRoot() {
+  server.send_P(200, "text/html", CONFIG_HTML);
+}
+
+void handleSave() {
+  int  sensorNum = server.arg("sensorNum").toInt();
+  bool staticIp  = server.hasArg("staticIP");
+  int  port      = server.arg("mqttPort").toInt();
+  if (port == 0) port = 1883;
+
+  // Parse all four IP octets — default to 192.168.220.<sensorNum>
+  uint8_t ip0 = staticIp ? server.arg("ip1").toInt() : 192;
+  uint8_t ip1 = staticIp ? server.arg("ip2").toInt() : 168;
+  uint8_t ip2 = staticIp ? server.arg("ip3").toInt() : 220;
+  uint8_t ip3 = staticIp ? server.arg("ip4").toInt() : (uint8_t)sensorNum;
+
+  saveConfig(
+    sensorNum,
+    server.arg("ssid").c_str(),
+    server.arg("wifiPass").c_str(),
+    staticIp,
+    ip0, ip1, ip2, ip3,
+    server.arg("mqttBroker").c_str(),
+    port,
+    server.arg("mqttUser").c_str(),
+    server.arg("mqttPass").c_str()
+  );
+
+  server.send_P(200, "text/html", SAVED_HTML);
+  delay(1500);
+  ESP.restart();
+}
+
+void handleNotFound() {
+  // Redirect everything to root — captive portal behaviour
+  server.sendHeader("Location", "http://192.168.4.1/", true);
+  server.send(302, "text/plain", "");
+}
+
+// ═══════════════════════════════════════════════════════════
+//  START CONFIG PORTAL
+// ═══════════════════════════════════════════════════════════
+
+void startConfigPortal() {
+  // Use esp_efuse to read MAC before WiFi stack is initialised
+  // — fixes all-zeros bug in ESP32 Arduino core v3.x
+  uint8_t mac[6];
+  esp_efuse_mac_get_default(mac);
+  char apName[32];
+  snprintf(apName, sizeof(apName), "MOISTURE_%02X%02X%02X%02X%02X%02X",
+    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+  Serial.printf("Portal    — starting AP: %s\n", apName);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apName);
+
+  IPAddress apIP = WiFi.softAPIP();
+  Serial.printf("Portal    — IP: %s\n", apIP.toString().c_str());
+  Serial.printf("Portal    — will close in %d minutes\n", AP_TIMEOUT_MIN);
+
+  // DNS spoofing — redirects all domains to our IP
+  // triggers captive portal popup on iOS and Android automatically
+  dnsServer.start(53, "*", apIP);
+
+  server.on("/",     HTTP_GET,  handleRoot);
+  server.on("/save", HTTP_POST, handleSave);
+  server.onNotFound(handleNotFound);
+  server.begin();
+
+  unsigned long deadline = millis() + (unsigned long)AP_TIMEOUT_MIN * 60 * 1000UL;
+
+  while (millis() < deadline) {
+    dnsServer.processNextRequest();
+    server.handleClient();
+    delay(10);
+  }
+
+  // Timed out — sleep then restart to retry WiFi
+  server.stop();
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  Serial.printf("Portal    — timed out, sleeping %d minutes\n", AP_SLEEP_MIN);
+  Serial.flush();
+  esp_sleep_enable_timer_wakeup((uint64_t)AP_SLEEP_MIN * 60 * 1000000ULL);
+  esp_deep_sleep_start();
+}
+
+// ═══════════════════════════════════════════════════════════
+//  SENSORS
 // ═══════════════════════════════════════════════════════════
 
 void goToSleep() {
@@ -77,74 +357,83 @@ void goToSleep() {
   esp_deep_sleep_start();
 }
 
-// ── Moisture ───────────────────────────────────────────────
-
 int readMoisture() {
   analogSetPinAttenuation(MOISTURE_PIN, ADC_11db);
   delay(500);
-
   long sum = 0;
   for (int i = 0; i < 10; i++) {
     sum += analogReadMilliVolts(MOISTURE_PIN);
     delay(10);
   }
   int avgMv = sum / 10;
-
   int percent = map(avgMv, DRY_MV, WET_MV, 0, 100);
   percent = constrain(percent, 0, 100);
-
   Serial.printf("Moisture  — raw: %dmV  →  %d%%\n", avgMv, percent);
   return avgMv;
 }
 
-// ── Battery ────────────────────────────────────────────────
-
 float readBatteryVoltage(int &rawMv) {
-  // No attenuation on A0 — internal pull-down handles the divider
-  // Seeed reference uses plain analogReadMilliVolts with no attenuation set
   delay(10);
-
   long sum = 0;
-  for (int i = 0; i < 16; i++) {   // 16 samples as per Seeed reference
+  for (int i = 0; i < 16; i++) {
     sum += analogReadMilliVolts(BATTERY_PIN);
     delay(5);
   }
   rawMv = sum / 16;
-
   float voltage = (rawMv / 1000.0 * DIVIDER_RATIO) + BAT_CAL_OFFSET;
-
   if (voltage < BAT_MIN || voltage > BAT_MAX) {
     Serial.printf("Battery   — suspicious reading %.2fV (raw: %dmV), discarding\n",
       voltage, rawMv);
     return -1.0;
   }
-
   Serial.printf("Battery   — raw: %dmV  →  %.2fV\n", rawMv, voltage);
   return voltage;
 }
 
-
 int batteryPercent(float voltage) {
-  if (voltage >= 4.10) return 100;
-  if (voltage >= 3.90) return 80;
-  if (voltage >= 3.70) return 60;
-  if (voltage >= 3.50) return 40;
-  if (voltage >= 3.30) return 20;
-  if (voltage >= 3.10) return  5;
-  return 0;
-}
+  // 18650 discharge curve — piecewise linear interpolation
+  // Voltage points and corresponding percentages
+  // Based on typical Li-ion discharge at low current (matches our use case well)
+  const float v[] = { 3.00, 3.10, 3.25, 3.50, 3.60, 3.70, 3.80, 3.90, 4.00, 4.10, 4.20 };
+  const int   p[] = {    0,    5,   10,   20,   35,   50,   65,   80,   90,   95,  100 };
+  const int   n   = sizeof(v) / sizeof(v[0]);
 
-// ── WiFi ───────────────────────────────────────────────────
+  // Below minimum — dead
+  if (voltage <= v[0]) return 0;
 
-void connectWifi() {
-  if (!WiFi.config(STATIC_IP, GATEWAY, SUBNET, DNS)) {
-    Serial.println("WiFi      — static IP config failed");
+  // Above maximum — full
+  if (voltage >= v[n-1]) return 100;
+
+  // Find which segment we're in and interpolate
+  for (int i = 0; i < n - 1; i++) {
+    if (voltage >= v[i] && voltage < v[i+1]) {
+      float ratio = (voltage - v[i]) / (v[i+1] - v[i]);
+      return (int)(p[i] + ratio * (p[i+1] - p[i]));
+    }
   }
 
-  Serial.printf("WiFi      — connecting to %s as %s",
-    WIFI_SSID, STATIC_IP.toString().c_str());
+  return 0;  // fallback — should never reach here
+}
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+// ═══════════════════════════════════════════════════════════
+//  WIFI + MQTT
+// ═══════════════════════════════════════════════════════════
+
+bool connectWifi() {
+  WiFi.mode(WIFI_STA);
+
+  if (cfg.staticIP) {
+    IPAddress ip (cfg.ip[0], cfg.ip[1], cfg.ip[2], cfg.ip[3]);
+    IPAddress gw (cfg.ip[0], cfg.ip[1], cfg.ip[2], 1);
+    IPAddress sn (255, 255, 0, 0);
+    if (!WiFi.config(ip, gw, sn, gw)) {
+      Serial.println("WiFi      — static IP config failed");
+    }
+  }
+
+  Serial.printf("WiFi      — connecting to %s", cfg.wifiSSID);
+  WiFi.begin(cfg.wifiSSID,
+    strlen(cfg.wifiPassword) > 0 ? cfg.wifiPassword : nullptr);
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
@@ -156,25 +445,30 @@ void connectWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("\nWiFi      — connected, IP: %s\n",
       WiFi.localIP().toString().c_str());
-  } else {
-    Serial.println("\nWiFi      — failed, going to sleep");
-    goToSleep();
+    return true;
   }
+
+  Serial.println("\nWiFi      — failed");
+  return false;
 }
 
-// ── MQTT ───────────────────────────────────────────────────
+WiFiClient   wifiClient;
+PubSubClient mqtt(wifiClient);
 
 void connectMqtt() {
-  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
-  mqtt.setBufferSize(512);   // needed for discovery payloads
+  mqtt.setServer(cfg.mqttBroker, cfg.mqttPort);
+  mqtt.setBufferSize(512);
   String clientId = String("garden-") + SENSOR_ID;
-
   Serial.printf("MQTT      — connecting to %s as %s\n",
-    MQTT_BROKER, clientId.c_str());
+    cfg.mqttBroker, clientId.c_str());
 
   int attempts = 0;
   while (!mqtt.connected() && attempts < 5) {
-    if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD)) {
+    bool ok = (strlen(cfg.mqttUser) > 0)
+      ? mqtt.connect(clientId.c_str(), cfg.mqttUser, cfg.mqttPassword)
+      : mqtt.connect(clientId.c_str());
+
+    if (ok) {
       Serial.println("MQTT      — connected");
     } else {
       Serial.printf("MQTT      — failed (rc=%d), retrying\n", mqtt.state());
@@ -189,11 +483,11 @@ void connectMqtt() {
   }
 }
 
-// ── HA Autodiscovery ───────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+//  HA AUTODISCOVERY
+// ═══════════════════════════════════════════════════════════
 
 void publishDiscovery() {
-  // Device block — shared across all entities, groups them in HA
-  // under one device card
   char device[192];
   snprintf(device, sizeof(device),
     "\"device\":{"
@@ -204,62 +498,33 @@ void publishDiscovery() {
     "}",
     SENSOR_ID, SENSOR_NAME);
 
-  // ── Moisture % ──────────────────────────────────────────
   char payload[512];
-  snprintf(payload, sizeof(payload),
-    "{"
-      "\"name\":\"Moisture\","
-      "\"unique_id\":\"%s_moisture\","
-      "\"state_topic\":\"%s\","
-      "\"value_template\":\"{{ value_json.moisture }}\","
-      "\"unit_of_measurement\":\"%%\","
-      "\"device_class\":\"moisture\","
-      "\"state_class\":\"measurement\","
-      "\"icon\":\"mdi:water-percent\","
-      "%s"
-    "}",
-    SENSOR_ID, STATE_TOPIC, device);
 
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Moisture\",\"unique_id\":\"%s_moisture\","
+    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.moisture }}\","
+    "\"unit_of_measurement\":\"%%\",\"device_class\":\"moisture\","
+    "\"state_class\":\"measurement\",\"icon\":\"mdi:water-percent\",%s}",
+    SENSOR_ID, STATE_TOPIC, device);
   mqtt.publish(DISC_MOISTURE, payload, true);
-  Serial.printf("Discovery — moisture: %s\n", DISC_MOISTURE);
   mqtt.loop(); delay(50);
 
-  // ── Battery voltage ─────────────────────────────────────
   snprintf(payload, sizeof(payload),
-    "{"
-      "\"name\":\"Battery Voltage\","
-      "\"unique_id\":\"%s_battery_v\","
-      "\"state_topic\":\"%s\","
-      "\"value_template\":\"{{ value_json.battery_v }}\","
-      "\"unit_of_measurement\":\"V\","
-      "\"device_class\":\"voltage\","
-      "\"state_class\":\"measurement\","
-      "\"icon\":\"mdi:battery\","
-      "%s"
-    "}",
+    "{\"name\":\"Battery Voltage\",\"unique_id\":\"%s_battery_v\","
+    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.battery_v }}\","
+    "\"unit_of_measurement\":\"V\",\"device_class\":\"voltage\","
+    "\"state_class\":\"measurement\",\"icon\":\"mdi:battery\",%s}",
     SENSOR_ID, STATE_TOPIC, device);
-
   mqtt.publish(DISC_BAT_V, payload, true);
-  Serial.printf("Discovery — battery_v: %s\n", DISC_BAT_V);
   mqtt.loop(); delay(50);
 
-  // ── Battery percent ─────────────────────────────────────
   snprintf(payload, sizeof(payload),
-    "{"
-      "\"name\":\"Battery\","
-      "\"unique_id\":\"%s_battery_pct\","
-      "\"state_topic\":\"%s\","
-      "\"value_template\":\"{{ value_json.battery_pct }}\","
-      "\"unit_of_measurement\":\"%%\","
-      "\"device_class\":\"battery\","
-      "\"state_class\":\"measurement\","
-      "\"icon\":\"mdi:battery-percent\","
-      "%s"
-    "}",
+    "{\"name\":\"Battery\",\"unique_id\":\"%s_battery_pct\","
+    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.battery_pct }}\","
+    "\"unit_of_measurement\":\"%%\",\"device_class\":\"battery\","
+    "\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\",%s}",
     SENSOR_ID, STATE_TOPIC, device);
-
   mqtt.publish(DISC_BAT_PCT, payload, true);
-  Serial.printf("Discovery — battery_pct: %s\n", DISC_BAT_PCT);
   mqtt.loop(); delay(50);
 
   Serial.println("Discovery — complete");
@@ -276,75 +541,54 @@ void setup() {
   Serial.println(  "║   Garden Sensor Boot     ║");
   Serial.println(  "╚══════════════════════════╝");
 
-// Derive all identity fields from SENSOR_NUMBER
-  snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  SENSOR_NUMBER);
-  snprintf(SENSOR_NAME, sizeof(SENSOR_NAME), "Garden Moisture Sensor %d", SENSOR_NUMBER);
-  STATIC_IP = IPAddress(192, 168, 220, SENSOR_NUMBER);
+  loadConfig();
 
-  // Build topics from SENSOR_ID
-  snprintf(STATE_TOPIC,    sizeof(STATE_TOPIC),
-    "garden/%s/state", SENSOR_ID);
-  snprintf(DISC_MOISTURE,  sizeof(DISC_MOISTURE),
-    "%s/sensor/%s_moisture/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_BAT_V,     sizeof(DISC_BAT_V),
-    "%s/sensor/%s_battery_v/config",  HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_BAT_PCT,   sizeof(DISC_BAT_PCT),
-    "%s/sensor/%s_battery_pct/config",HA_DISCOVERY_PREFIX, SENSOR_ID);
+  if (!configLoaded) {
+    Serial.println("Config    — none found, starting portal");
+    startConfigPortal();
+    return;
+  }
+
+  buildDerivedConfig();
+  Serial.printf("Config    — sensor%d, SSID: %s, broker: %s\n",
+    cfg.sensorNumber, cfg.wifiSSID, cfg.mqttBroker);
 
   // Read sensors before WiFi — radio noise affects ADC
   int   moistureRawMv = readMoisture();
   int   moisturePct   = map(moistureRawMv, DRY_MV, WET_MV, 0, 100);
   moisturePct         = constrain(moisturePct, 0, 100);
 
-  int   batRawMv  = 0;
-  float batV      = readBatteryVoltage(batRawMv);
-  int   batPct    = (batV > 0) ? batteryPercent(batV) : -1;
+  int   batRawMv = 0;
+  float batV     = readBatteryVoltage(batRawMv);
+  int   batPct   = (batV > 0) ? batteryPercent(batV) : -1;
 
-  connectWifi();
+  // Try WiFi — open portal if it fails (handles transient outages)
+  if (!connectWifi()) {
+    Serial.println("Config    — WiFi failed, starting portal");
+    startConfigPortal();
+    return;
+  }
+
   connectMqtt();
-
-  // Publish discovery payloads — retained so HA gets them even
-  // if it restarts between sensor wake cycles
   publishDiscovery();
 
-  // Publish state
   if (mqtt.connected()) {
     char payload[256];
-
     if (batV > 0) {
       snprintf(payload, sizeof(payload),
-        "{"
-          "\"sensor\":\"%s\","
-          "\"moisture\":%d,"
-          "\"moisture_raw_mv\":%d,"
-          "\"dry_mv\":%d,"
-          "\"wet_mv\":%d,"
-          "\"battery_v\":%.2f,"
-          "\"battery_pct\":%d,"
-          "\"battery_raw_mv\":%d"
-        "}",
-        SENSOR_ID,
-        moisturePct, moistureRawMv,
-        DRY_MV, WET_MV,
-        batV, batPct, batRawMv);
+        "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
+        "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":%.2f,"
+        "\"battery_pct\":%d,\"battery_raw_mv\":%d}",
+        SENSOR_ID, moisturePct, moistureRawMv,
+        DRY_MV, WET_MV, batV, batPct, batRawMv);
     } else {
       snprintf(payload, sizeof(payload),
-        "{"
-          "\"sensor\":\"%s\","
-          "\"moisture\":%d,"
-          "\"moisture_raw_mv\":%d,"
-          "\"dry_mv\":%d,"
-          "\"wet_mv\":%d,"
-          "\"battery_v\":null,"
-          "\"battery_pct\":null,"
-          "\"battery_raw_mv\":%d"
-        "}",
-        SENSOR_ID,
-        moisturePct, moistureRawMv,
-        DRY_MV, WET_MV,
-        batRawMv);
+        "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
+        "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":null,"
+        "\"battery_pct\":null,\"battery_raw_mv\":%d}",
+        SENSOR_ID, moisturePct, moistureRawMv,
+        DRY_MV, WET_MV, batRawMv);
     }
-
     bool ok = mqtt.publish(STATE_TOPIC, payload, true);
     Serial.printf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
     mqtt.loop();
