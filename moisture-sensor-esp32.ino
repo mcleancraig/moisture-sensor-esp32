@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <secrets.h>
 #include <PubSubClient.h>
 
 // ═══════════════════════════════════════════════════════════
@@ -9,8 +10,8 @@
 const int SENSOR_NUMBER = 2;  // ← change this only, everything derives from it
 
 // WiFi
-const char* WIFI_SSID       = "CANDI_2.4G";
-const char* WIFI_PASSWORD   = "bruteforcethis";
+const char* WIFI_SSID       = S_WIFI_SSID;
+const char* WIFI_PASSWORD   = S_WIFI_PASSWORD;
 
 IPAddress GATEWAY  (192, 168,  1,   1);
 IPAddress SUBNET   (255, 255, 0,   0);
@@ -19,8 +20,8 @@ IPAddress DNS      (192, 168,  1,   1);
 // MQTT
 const char* MQTT_BROKER     = "192.168.11.1";
 const int   MQTT_PORT       = 1883;
-const char* MQTT_USER       = "hass";
-const char* MQTT_PASSWORD   = "hasspassword";
+const char* MQTT_USER       = S_MQTT_USER;
+const char* MQTT_PASSWORD   = S_MQTT_PASSWORD;
 
 // Moisture calibration — recalibrate per sensor
 const int   DRY_MV          = 2800;
