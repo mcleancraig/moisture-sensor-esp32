@@ -4,19 +4,21 @@
 #include <Preferences.h>
 #include <PubSubClient.h>
 #include <ArduinoOTA.h>
-#include "esp_mac.h"
 #include <ESPmDNS.h>
+#include <time.h>
+#include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
-//  v2.0.0
+//  v2.1.0
 //  - Captive portal config on first boot
 //  - Boot button hold to reconfigure without reflashing
 //  - OTA firmware updates over WiFi
 //  - Firmware version in MQTT payload
+//  - NTP timestamp in MQTT payload
 //  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
 
-#define FIRMWARE_VERSION "2.0.0"
+#define FIRMWARE_VERSION "2.1.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -35,11 +37,16 @@ const float BAT_MAX        = 4.3;
 const int SLEEP_MINUTES      = 15;
 const int AP_TIMEOUT_MIN     = 10;
 const int AP_SLEEP_MIN       = 10;
-const int BOOT_HOLD_MS       = 3000;   // hold boot button this long to reconfigure
-const int OTA_WAIT_MS        = 5000;  // stay awake this long for OTA after connect
+const int BOOT_HOLD_MS       = 3000;
+const int OTA_WAIT_MS        = 5000;
 
 // ── AP credentials ────────────────────────────────────────
-const char* AP_PASSWORD      = "moisture";   // min 8 chars required by WPA2
+const char* AP_PASSWORD      = "moisture";
+
+// ── NTP ───────────────────────────────────────────────────
+const char* NTP_SERVER   = "pool.ntp.org";
+const long  GMT_OFFSET_S = 0;   // UTC — HA handles timezone display
+const int   DST_OFFSET_S = 0;
 
 // ── HA discovery prefix ───────────────────────────────────
 const char* HA_DISCOVERY_PREFIX = "homeassistant";
@@ -270,26 +277,6 @@ const char SAVED_HTML[] PROGMEM = R"rawhtml(
 </html>
 )rawhtml";
 
-const char RECONFIG_HTML[] PROGMEM = R"rawhtml(
-<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Reconfiguring</title>
-<style>
-  body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:0 16px;
-    text-align:center;background:#f5f5f5}
-  h1{color:#2c7a4b}p{color:#555}
-</style>
-</head>
-<body>
-<h1>Reconfiguring...</h1>
-<p>Config cleared. The sensor is restarting into setup mode.</p>
-<p><small>Reconnect to the MOISTURE_ network to reconfigure.</small></p>
-</body>
-</html>
-)rawhtml";
-
 // ═══════════════════════════════════════════════════════════
 //  PORTAL HANDLERS
 // ═══════════════════════════════════════════════════════════
@@ -325,13 +312,6 @@ void handleSave() {
   ESP.restart();
 }
 
-void handleReconfig() {
-  server.send_P(200, "text/html", RECONFIG_HTML);
-  delay(1500);
-  clearConfig();
-  ESP.restart();
-}
-
 void handleNotFound() {
   server.sendHeader("Location", "http://192.168.4.1/", true);
   server.send(302, "text/plain", "");
@@ -360,9 +340,8 @@ void startConfigPortal() {
 
   dnsServer.start(53, "*", apIP);
 
-  server.on("/",         HTTP_GET,  handleRoot);
-  server.on("/save",     HTTP_POST, handleSave);
-  server.on("/reconfig", HTTP_POST, handleReconfig);
+  server.on("/",     HTTP_GET,  handleRoot);
+  server.on("/save", HTTP_POST, handleSave);
   server.onNotFound(handleNotFound);
   server.begin();
 
@@ -388,14 +367,7 @@ void startConfigPortal() {
 // ═══════════════════════════════════════════════════════════
 
 void setupOTA() {
-  // mDNS is required for the IDE to discover and communicate with the device
-  if (!MDNS.begin(SENSOR_ID)) {
-    Serial.println("OTA       — mDNS failed to start");
-  }
-  // OTA hostname is sensor ID so it shows up clearly in IDE
   ArduinoOTA.setHostname(SENSOR_ID);
-
-  // OTA password matches AP password for consistency
   ArduinoOTA.setPassword(AP_PASSWORD);
 
   ArduinoOTA.onStart([]() {
@@ -413,6 +385,41 @@ void setupOTA() {
 
   ArduinoOTA.begin();
   Serial.printf("OTA       — ready, hostname: %s\n", SENSOR_ID);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  NTP + TIMESTAMP
+// ═══════════════════════════════════════════════════════════
+
+bool syncNTP() {
+  configTime(GMT_OFFSET_S, DST_OFFSET_S, NTP_SERVER);
+  Serial.print("NTP       — syncing");
+  struct tm t;
+  int attempts = 0;
+  while (!getLocalTime(&t) && attempts < 10) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  if (getLocalTime(&t)) {
+    Serial.printf("\nNTP       — synced: %04d-%02d-%02dT%02d:%02d:%02dZ\n",
+      t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+      t.tm_hour, t.tm_min, t.tm_sec);
+    return true;
+  }
+  Serial.println("\nNTP       — sync failed, timestamp will be omitted");
+  return false;
+}
+
+void getTimestamp(char* buf, size_t len) {
+  struct tm t;
+  if (getLocalTime(&t)) {
+    snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+      t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+      t.tm_hour, t.tm_min, t.tm_sec);
+  } else {
+    snprintf(buf, len, "unknown");
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -460,7 +467,6 @@ float readBatteryVoltage(int &rawMv) {
 }
 
 int batteryPercent(float voltage) {
-  // Piecewise linear interpolation from real 18650 discharge curve
   const float v[] = { 3.00, 3.10, 3.25, 3.50, 3.60, 3.70, 3.80, 3.90, 4.00, 4.10, 4.20 };
   const int   p[] = {    0,    5,   10,   20,   35,   50,   65,   80,   90,   95,  100 };
   const int   n   = sizeof(v) / sizeof(v[0]);
@@ -653,8 +659,14 @@ void setup() {
     return;
   }
 
+  // ── NTP sync ─────────────────────────────────────────────
+  syncNTP();
+
   // ── OTA — stay awake briefly to accept waiting updates ───
   setupOTA();
+  if (!MDNS.begin(SENSOR_ID)) {
+    Serial.println("OTA       — mDNS failed to start");
+  }
   Serial.printf("OTA       — listening for %dms\n", OTA_WAIT_MS);
   unsigned long otaDeadline = millis() + OTA_WAIT_MS;
   while (millis() < otaDeadline) {
@@ -667,23 +679,26 @@ void setup() {
   publishDiscovery();
 
   if (mqtt.connected()) {
-    char payload[320];
+    char timestamp[32];
+    getTimestamp(timestamp, sizeof(timestamp));
+
+    char payload[384];
     if (batV > 0) {
       snprintf(payload, sizeof(payload),
         "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
         "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":%.2f,"
-        "\"battery_pct\":%d,\"battery_raw_mv\":%d,\"fw\":\"%s\"}",
+        "\"battery_pct\":%d,\"battery_raw_mv\":%d,\"fw\":\"%s\",\"ts\":\"%s\"}",
         SENSOR_ID, moisturePct, moistureRawMv,
         DRY_MV, WET_MV, batV, batPct, batRawMv,
-        FIRMWARE_VERSION);
+        FIRMWARE_VERSION, timestamp);
     } else {
       snprintf(payload, sizeof(payload),
         "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
         "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":null,"
-        "\"battery_pct\":null,\"battery_raw_mv\":%d,\"fw\":\"%s\"}",
+        "\"battery_pct\":null,\"battery_raw_mv\":%d,\"fw\":\"%s\",\"ts\":\"%s\"}",
         SENSOR_ID, moisturePct, moistureRawMv,
         DRY_MV, WET_MV, batRawMv,
-        FIRMWARE_VERSION);
+        FIRMWARE_VERSION, timestamp);
     }
     bool ok = mqtt.publish(STATE_TOPIC, payload, true);
     Serial.printf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
