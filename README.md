@@ -20,6 +20,12 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 
 ---
 
+## Wiring diagram
+
+![Wiring diagram](wiring-diagram.svg)
+
+---
+
 ## Hardware
 
 ### Per sensor
