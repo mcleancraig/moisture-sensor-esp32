@@ -5,6 +5,8 @@ Items identified during v2 development for future releases.
 ## Security
 
 - [ ] **Per-device AP password** — derive the portal password from the last 3 bytes of the device MAC address instead of the shared `moisture` string. Print the password on a label affixed to the enclosure so each unit has a unique credential without any configuration overhead.
+- [ ] **P-channel MOSFET reverse polarity protection** — replace the removed 1N5819 diode with a P-channel MOSFET (e.g. AO3401) wired as a reverse polarity switch. Unlike the diode this has near-zero voltage drop and allows bidirectional current, meaning charging works correctly while still protecting against reversed battery insertion. The 1N5819 diode blocked charging current and has been removed from the design pending this fix.
+
 
 ## Maintainability
 

@@ -35,13 +35,13 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 | MCU | Seeed XIAO ESP32-C6 |
 | Moisture sensor | HW-390 capacitive, 3-pin (VCC / GND / AOUT) |
 | Battery | 18650 Li-ion, 2000mAh recommended |
-| Reverse polarity protection | 1N5819 Schottky diode in series with battery positive |
+| Reverse polarity protection | None currently - working on a MOSFET solution |
 | Battery voltage divider | 2× 220kΩ resistors (BAT+ → A0 → GND) |
 
 ### Wiring
 
 ```
-18650 (+) ── 1N5819 (anode→cathode) ──┬── XIAO BAT+ pad
+18650 (+) ─────────────────────────────┬── XIAO BAT+ pad
                                        └── 220kΩ ── A0 ── 220kΩ ── GND
 
 18650 (−) ────────────────────────────── XIAO BAT− pad ── GND
@@ -263,7 +263,7 @@ Recalibrate — the `DRY_MV` and `WET_MV` values in the firmware need to match y
 The battery reading falls outside the sanity check range (2.5V–4.3V). Check the voltage divider wiring — two 220kΩ resistors from BAT+ to A0 to GND. Confirm A0 is the pin connected to the midpoint, not A1.
 
 **Sensor getting hot when USB connected**
-Disconnect the battery before connecting USB. Do not have both connected simultaneously unless a Schottky diode is fitted on the 5V pin path.
+Check battery orientation carefully — no reverse polarity protection is currently fitted.
 
 ---
 
