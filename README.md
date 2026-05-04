@@ -252,7 +252,7 @@ Recalibrate — the `DRY_MV` and `WET_MV` values in the firmware need to match y
 The battery reading falls outside the sanity check range (2.5V–4.3V). Check the voltage divider wiring — two 220kΩ resistors from BAT+ to A0 to GND. Confirm A0 is the pin connected to the midpoint, not A1.
 
 **Sensor getting hot when USB connected**
-Disconnect the battery before connecting USB. Do not have both connected simultaneously unless a Schottky diode is fitted on the 5V pin path.
+Check battery polarity. Overheating is caused by reverse polarity on the battery connection, not by USB and battery being connected simultaneously. USB and battery can safely coexist — the onboard charger is designed for this. Verify the 1N5819 diode is fitted with anode toward the battery positive terminal.
 
 ---
 
