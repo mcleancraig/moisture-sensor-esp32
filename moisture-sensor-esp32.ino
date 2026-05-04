@@ -9,16 +9,17 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
-//  v2.1.0
+//  v2.2.0
 //  - Captive portal config on first boot
 //  - Boot button hold to reconfigure without reflashing
 //  - OTA firmware updates over WiFi
 //  - Firmware version in MQTT payload
-//  - NTP timestamp in MQTT payload
+//  - NTP timestamp in MQTT payload (10s timeout)
+//  - Gateway, netmask and DNS configurable via portal
 //  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
 
-#define FIRMWARE_VERSION "2.1.0"
+#define FIRMWARE_VERSION "2.2.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -39,6 +40,7 @@ const int AP_TIMEOUT_MIN     = 10;
 const int AP_SLEEP_MIN       = 10;
 const int BOOT_HOLD_MS       = 3000;
 const int OTA_WAIT_MS        = 5000;
+const int NTP_TIMEOUT_MS     = 10000;  // give up on NTP after 10 seconds
 
 // ── AP credentials ────────────────────────────────────────
 const char* AP_PASSWORD      = "moisture";
@@ -63,6 +65,9 @@ struct Config {
   char    wifiPassword[64];
   bool    staticIP;
   uint8_t ip[4];
+  uint8_t gw[4];
+  uint8_t sn[4];
+  uint8_t dns[4];
   char    mqttBroker[64];
   int     mqttPort;
   char    mqttUser[32];
@@ -77,10 +82,27 @@ void loadConfig() {
   prefs.getString("wifiSSID",   cfg.wifiSSID,    sizeof(cfg.wifiSSID));
   prefs.getString("wifiPass",   cfg.wifiPassword,sizeof(cfg.wifiPassword));
   cfg.staticIP  = prefs.getBool("staticIP", false);
-  cfg.ip[0]     = prefs.getUChar("ip0", 192);
-  cfg.ip[1]     = prefs.getUChar("ip1", 168);
-  cfg.ip[2]     = prefs.getUChar("ip2", 220);
-  cfg.ip[3]     = prefs.getUChar("ip3", 1);
+  // Static IP
+  cfg.ip[0]  = prefs.getUChar("ip0",  192);
+  cfg.ip[1]  = prefs.getUChar("ip1",  168);
+  cfg.ip[2]  = prefs.getUChar("ip2",  220);
+  cfg.ip[3]  = prefs.getUChar("ip3",    1);
+  // Gateway
+  cfg.gw[0]  = prefs.getUChar("gw0",  192);
+  cfg.gw[1]  = prefs.getUChar("gw1",  168);
+  cfg.gw[2]  = prefs.getUChar("gw2",    1);
+  cfg.gw[3]  = prefs.getUChar("gw3",    1);
+  // Subnet mask
+  cfg.sn[0]  = prefs.getUChar("sn0",  255);
+  cfg.sn[1]  = prefs.getUChar("sn1",  255);
+  cfg.sn[2]  = prefs.getUChar("sn2",    0);
+  cfg.sn[3]  = prefs.getUChar("sn3",    0);
+  // DNS
+  cfg.dns[0] = prefs.getUChar("dns0", 192);
+  cfg.dns[1] = prefs.getUChar("dns1", 168);
+  cfg.dns[2] = prefs.getUChar("dns2",   1);
+  cfg.dns[3] = prefs.getUChar("dns3",   1);
+
   prefs.getString("mqttBroker", cfg.mqttBroker,  sizeof(cfg.mqttBroker));
   cfg.mqttPort  = prefs.getInt("mqttPort", 1883);
   prefs.getString("mqttUser",   cfg.mqttUser,    sizeof(cfg.mqttUser));
@@ -99,19 +121,27 @@ void clearConfig() {
 
 void saveConfig(int sensorNum,
                 const char* ssid, const char* wifiPass,
-                bool staticIp, uint8_t ip0, uint8_t ip1, uint8_t ip2, uint8_t ip3,
+                bool staticIp,
+                uint8_t ip0,  uint8_t ip1,  uint8_t ip2,  uint8_t ip3,
+                uint8_t gw0,  uint8_t gw1,  uint8_t gw2,  uint8_t gw3,
+                uint8_t sn0,  uint8_t sn1,  uint8_t sn2,  uint8_t sn3,
+                uint8_t dns0, uint8_t dns1, uint8_t dns2, uint8_t dns3,
                 const char* broker, int port,
                 const char* user, const char* mqttPass) {
   prefs.begin("sensor", false);
-  prefs.putInt("sensorNum",   sensorNum);
+  prefs.putInt("sensorNum",  sensorNum);
   prefs.putString("wifiSSID",  ssid);
   prefs.putString("wifiPass",  wifiPass);
   prefs.putBool("staticIP",    staticIp);
-  prefs.putUChar("ip0",        ip0);
-  prefs.putUChar("ip1",        ip1);
-  prefs.putUChar("ip2",        ip2);
-  prefs.putUChar("ip3",        ip3);
-  prefs.putString("mqttBroker",broker);
+  prefs.putUChar("ip0",  ip0);  prefs.putUChar("ip1",  ip1);
+  prefs.putUChar("ip2",  ip2);  prefs.putUChar("ip3",  ip3);
+  prefs.putUChar("gw0",  gw0);  prefs.putUChar("gw1",  gw1);
+  prefs.putUChar("gw2",  gw2);  prefs.putUChar("gw3",  gw3);
+  prefs.putUChar("sn0",  sn0);  prefs.putUChar("sn1",  sn1);
+  prefs.putUChar("sn2",  sn2);  prefs.putUChar("sn3",  sn3);
+  prefs.putUChar("dns0", dns0); prefs.putUChar("dns1", dns1);
+  prefs.putUChar("dns2", dns2); prefs.putUChar("dns3", dns3);
+  prefs.putString("mqttBroker", broker);
   prefs.putInt("mqttPort",     port);
   prefs.putString("mqttUser",  user);
   prefs.putString("mqttPass",  mqttPass);
@@ -156,7 +186,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Moisture Sensor Setup</title>
 <style>
-  body{font-family:sans-serif;max-width:420px;margin:40px auto;padding:0 16px;background:#f5f5f5}
+  body{font-family:sans-serif;max-width:460px;margin:40px auto;padding:0 16px;background:#f5f5f5}
   h1{font-size:1.3em;color:#2c7a4b;margin-bottom:4px}
   p.sub{color:#666;font-size:.85em;margin-top:0}
   label{display:block;margin-top:14px;font-size:.9em;color:#333;font-weight:600}
@@ -170,11 +200,12 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
   button:hover{background:#215c38}
   .hint{font-size:.78em;color:#888;margin-top:2px}
   .ip-wrap{display:flex;gap:4px;margin-top:4px;align-items:center}
-  .ip-wrap input{width:60px;padding:8px;text-align:center;flex:none}
+  .ip-wrap input{width:58px;padding:8px;text-align:center;flex:none}
   .ip-wrap span{color:#555;font-weight:700}
-  #ip-row{display:none;margin-top:10px}
+  #network-rows{display:none;margin-top:4px}
   .chk-row{display:flex;align-items:center;gap:8px;margin-top:14px}
   .chk-row input{width:auto;margin:0}
+  h3{font-size:.95em;color:#555;margin:16px 0 4px}
 </style>
 </head>
 <body>
@@ -186,7 +217,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
   <div class="section">
     <label>Sensor number
       <input type="number" name="sensorNum" id="sensorNum" min="1" max="254"
-        value="1" required oninput="syncOctet()">
+        value="1" required oninput="syncNet()">
     </label>
     <p class="hint">Sets sensor ID, friendly name, and default last IP octet</p>
   </div>
@@ -201,11 +232,12 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
     </label>
     <div class="chk-row">
       <input type="checkbox" name="staticIP" id="staticChk"
-        onchange="toggleIP(this)">
+        onchange="toggleNet(this)">
       <label for="staticChk" style="margin:0;font-weight:600">Use static IP</label>
     </div>
-    <div id="ip-row">
-      <label>Static IP address</label>
+
+    <div id="network-rows">
+      <h3>IP address</h3>
       <div class="ip-wrap">
         <input type="number" name="ip1" id="ip1" value="192" min="0" max="255">
         <span>.</span>
@@ -214,6 +246,39 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
         <input type="number" name="ip3" id="ip3" value="220" min="0" max="255">
         <span>.</span>
         <input type="number" name="ip4" id="ip4" min="1" max="254" value="1">
+      </div>
+
+      <h3>Gateway (router)</h3>
+      <div class="ip-wrap">
+        <input type="number" name="gw1" id="gw1" value="192" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="gw2" id="gw2" value="168" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="gw3" id="gw3" value="1" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="gw4" id="gw4" value="1" min="0" max="255">
+      </div>
+
+      <h3>Subnet mask</h3>
+      <div class="ip-wrap">
+        <input type="number" name="sn1" id="sn1" value="255" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="sn2" id="sn2" value="255" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="sn3" id="sn3" value="0" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="sn4" id="sn4" value="0" min="0" max="255">
+      </div>
+
+      <h3>DNS server</h3>
+      <div class="ip-wrap">
+        <input type="number" name="dns1" id="dns1" value="192" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="dns2" id="dns2" value="168" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="dns3" id="dns3" value="1" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="dns4" id="dns4" value="1" min="0" max="255">
       </div>
     </div>
   </div>
@@ -239,18 +304,14 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 </form>
 
 <script>
-function syncOctet() {
-  if (!document.getElementById('staticChk').checked) return;
-  document.getElementById('ip4').value =
-    document.getElementById('sensorNum').value;
+function syncNet() {
+  var n = document.getElementById('sensorNum').value;
+  document.getElementById('ip4').value = n;
 }
-function toggleIP(cb) {
-  document.getElementById('ip-row').style.display =
+function toggleNet(cb) {
+  document.getElementById('network-rows').style.display =
     cb.checked ? 'block' : 'none';
-  if (cb.checked) {
-    document.getElementById('ip4').value =
-      document.getElementById('sensorNum').value;
-  }
+  if (cb.checked) syncNet();
 }
 </script>
 </body>
@@ -291,16 +352,36 @@ void handleSave() {
   int  port      = server.arg("mqttPort").toInt();
   if (port == 0) port = 1883;
 
+  // Static IP
   uint8_t ip0 = staticIp ? server.arg("ip1").toInt() : 192;
   uint8_t ip1 = staticIp ? server.arg("ip2").toInt() : 168;
   uint8_t ip2 = staticIp ? server.arg("ip3").toInt() : 220;
   uint8_t ip3 = staticIp ? server.arg("ip4").toInt() : (uint8_t)sensorNum;
+  // Gateway
+  uint8_t gw0 = staticIp ? server.arg("gw1").toInt() : 192;
+  uint8_t gw1 = staticIp ? server.arg("gw2").toInt() : 168;
+  uint8_t gw2 = staticIp ? server.arg("gw3").toInt() : 1;
+  uint8_t gw3 = staticIp ? server.arg("gw4").toInt() : 1;
+  // Subnet
+  uint8_t sn0 = staticIp ? server.arg("sn1").toInt() : 255;
+  uint8_t sn1 = staticIp ? server.arg("sn2").toInt() : 255;
+  uint8_t sn2 = staticIp ? server.arg("sn3").toInt() : 0;
+  uint8_t sn3 = staticIp ? server.arg("sn4").toInt() : 0;
+  // DNS
+  uint8_t dns0 = staticIp ? server.arg("dns1").toInt() : 192;
+  uint8_t dns1 = staticIp ? server.arg("dns2").toInt() : 168;
+  uint8_t dns2 = staticIp ? server.arg("dns3").toInt() : 1;
+  uint8_t dns3 = staticIp ? server.arg("dns4").toInt() : 1;
 
   saveConfig(
     sensorNum,
     server.arg("ssid").c_str(),
     server.arg("wifiPass").c_str(),
-    staticIp, ip0, ip1, ip2, ip3,
+    staticIp,
+    ip0, ip1, ip2, ip3,
+    gw0, gw1, gw2, gw3,
+    sn0, sn1, sn2, sn3,
+    dns0, dns1, dns2, dns3,
     server.arg("mqttBroker").c_str(),
     port,
     server.arg("mqttUser").c_str(),
@@ -395,20 +476,19 @@ bool syncNTP() {
   configTime(GMT_OFFSET_S, DST_OFFSET_S, NTP_SERVER);
   Serial.print("NTP       — syncing");
   struct tm t;
-  int attempts = 0;
-  while (!getLocalTime(&t) && attempts < 10) {
+  unsigned long start = millis();
+  while (!getLocalTime(&t)) {
+    if (millis() - start >= NTP_TIMEOUT_MS) {
+      Serial.println("\nNTP       — timed out after 10s, timestamp will be omitted");
+      return false;
+    }
     delay(500);
     Serial.print(".");
-    attempts++;
   }
-  if (getLocalTime(&t)) {
-    Serial.printf("\nNTP       — synced: %04d-%02d-%02dT%02d:%02d:%02dZ\n",
-      t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
-      t.tm_hour, t.tm_min, t.tm_sec);
-    return true;
-  }
-  Serial.println("\nNTP       — sync failed, timestamp will be omitted");
-  return false;
+  Serial.printf("\nNTP       — synced: %04d-%02d-%02dT%02d:%02d:%02dZ\n",
+    t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+    t.tm_hour, t.tm_min, t.tm_sec);
+  return true;
 }
 
 void getTimestamp(char* buf, size_t len) {
@@ -491,10 +571,11 @@ bool connectWifi() {
   WiFi.mode(WIFI_STA);
 
   if (cfg.staticIP) {
-    IPAddress ip(cfg.ip[0], cfg.ip[1], cfg.ip[2], cfg.ip[3]);
-    IPAddress gw(cfg.ip[0], cfg.ip[1], cfg.ip[2], 1);
-    IPAddress sn(255, 255, 0, 0);
-    if (!WiFi.config(ip, gw, sn, gw)) {
+    IPAddress ip (cfg.ip[0],  cfg.ip[1],  cfg.ip[2],  cfg.ip[3]);
+    IPAddress gw (cfg.gw[0],  cfg.gw[1],  cfg.gw[2],  cfg.gw[3]);
+    IPAddress sn (cfg.sn[0],  cfg.sn[1],  cfg.sn[2],  cfg.sn[3]);
+    IPAddress dns(cfg.dns[0], cfg.dns[1], cfg.dns[2], cfg.dns[3]);
+    if (!WiFi.config(ip, gw, sn, dns)) {
       Serial.println("WiFi      — static IP config failed");
     }
   }
@@ -659,7 +740,7 @@ void setup() {
     return;
   }
 
-  // ── NTP sync ─────────────────────────────────────────────
+  // ── NTP sync (10s timeout) ───────────────────────────────
   syncNTP();
 
   // ── OTA — stay awake briefly to accept waiting updates ───
