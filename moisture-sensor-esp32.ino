@@ -20,7 +20,11 @@
 // ═══════════════════════════════════════════════════════════
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 #define FIRMWARE_VERSION "2.0.2"
+=======
+#define FIRMWARE_VERSION "2.2.0"
+>>>>>>> 4095b1320fc248e282f7a437b6f03f15105050e3
 =======
 #define FIRMWARE_VERSION "2.2.0"
 >>>>>>> 4095b1320fc248e282f7a437b6f03f15105050e3
