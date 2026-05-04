@@ -1,184 +1,181 @@
 <svg width="100%" viewBox="0 0 760 640" xmlns="http://www.w3.org/2000/svg" role="img">
-  <title>Garden Soil Moisture Sensor — Production Wiring Diagram v2</title>
-  <desc>Correct pinout: XIAO ESP32-C6 with A0/A1 on left bottom, GND/3V3 on right bottom, BAT pads centre underside. HW-390 moisture sensor, 18650 with 1N5819 diode, 2x200kOhm voltage divider.</desc>
+  <title>Garden Soil Moisture Sensor — Production Wiring Diagram</title>
+  <desc>XIAO ESP32-C6 wiring: A0/A1 left-bottom, GND/3V3 right-top, BAT pads underside centre. HW-390, 18650, 1N5819 diode, 2x200kOhm divider.</desc>
 
-  <!-- ═══ XIAO ESP32-C6 board (centre) ═══
-       USB-C at TOP. Board oriented vertically.
-       LEFT side pins (top to bottom): D0/A0, D1/A1, D2, D3, D4, D5, D6
-       RIGHT side pins (top to bottom): 5V/VBUS, GND, 3V3, D10, D9, D8, D7
-       BAT pads: underside centre (shown as callout below board)
+  <!-- Colour palette — readable in light and dark mode
+       Green  #1D9E75  VCC / power positive
+       Grey   #888780  GND
+       Amber  #BA7517  Analog signal / midpoint
+       Purple #534AB7  Board labels
+       Tan    #854F0B  Diode
+       Slate  #5F5E5A  Battery / structural
+       Muted  #888780  Unused pins (same as GND but context differs)
   -->
-  <!-- Board outline -->
+
+  <!-- ═══ XIAO ESP32-C6 board ═══ -->
   <rect x="300" y="120" width="160" height="340" rx="10" fill="#EEEDFE" stroke="#534AB7" stroke-width="1"/>
-  <text x="380" y="148" text-anchor="middle" font-family="sans-serif" font-size="13" font-weight="500" fill="#26215C">XIAO ESP32-C6</text>
+  <text x="380" y="148" text-anchor="middle" font-family="sans-serif" font-size="13" font-weight="500" fill="#534AB7">XIAO ESP32-C6</text>
   <text x="380" y="164" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#534AB7">Seeed Studio</text>
 
-  <!-- USB-C port at top -->
-  <rect x="358" y="108" width="44" height="14" rx="4" fill="#888780" stroke="#444441" stroke-width="0.5"/>
-  <text x="380" y="118" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#F1EFE8">USB-C</text>
-  <text x="380" y="107" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#5F5E5A">flash only</text>
+  <!-- USB-C port (top, flash only) -->
+  <rect x="358" y="108" width="44" height="14" rx="4" fill="#888780" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="380" y="118" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#F1EFE8" dominant-baseline="central">USB-C</text>
+  <text x="380" y="104" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#888780">flash only</text>
 
-  <!-- LEFT side pins (top→bottom): A0, A1, D2, D3, D4, D5, D6 -->
-  <!-- Pin row spacing: start y=190, step=36 -->
-  <!-- A0 (GPIO0) -->
-  <line x1="300" y1="190" x2="280" y2="190" stroke="#888780" stroke-width="1"/>
-  <text x="275" y="190" text-anchor="end" font-family="sans-serif" font-size="9" fill="#26215C" dominant-baseline="central">A0 (GPIO0)</text>
-  <!-- A1 (GPIO1) -->
-  <line x1="300" y1="226" x2="280" y2="226" stroke="#888780" stroke-width="1"/>
-  <text x="275" y="226" text-anchor="end" font-family="sans-serif" font-size="9" fill="#26215C" dominant-baseline="central">A1 (GPIO1)</text>
-  <!-- D2..D6 labels (not used, shown for orientation) -->
-  <line x1="300" y1="262" x2="288" y2="262" stroke="#B4B2A9" stroke-width="0.5"/>
-  <text x="285" y="262" text-anchor="end" font-family="sans-serif" font-size="8" fill="#B4B2A9" dominant-baseline="central">D2</text>
-  <line x1="300" y1="298" x2="288" y2="298" stroke="#B4B2A9" stroke-width="0.5"/>
-  <text x="285" y="298" text-anchor="end" font-family="sans-serif" font-size="8" fill="#B4B2A9" dominant-baseline="central">D3</text>
-  <line x1="300" y1="334" x2="288" y2="334" stroke="#B4B2A9" stroke-width="0.5"/>
-  <text x="285" y="334" text-anchor="end" font-family="sans-serif" font-size="8" fill="#B4B2A9" dominant-baseline="central">D4</text>
-  <line x1="300" y1="370" x2="288" y2="370" stroke="#B4B2A9" stroke-width="0.5"/>
-  <text x="285" y="370" text-anchor="end" font-family="sans-serif" font-size="8" fill="#B4B2A9" dominant-baseline="central">D5</text>
-  <line x1="300" y1="406" x2="288" y2="406" stroke="#B4B2A9" stroke-width="0.5"/>
-  <text x="285" y="406" text-anchor="end" font-family="sans-serif" font-size="8" fill="#B4B2A9" dominant-baseline="central">D6/TX</text>
+  <!-- LEFT side pins: A0 (top), A1 below, then unused -->
+  <line x1="300" y1="190" x2="280" y2="190" stroke="#BA7517" stroke-width="1.2"/>
+  <text x="275" y="190" text-anchor="end" font-family="sans-serif" font-size="9" fill="#BA7517" dominant-baseline="central">A0 (GPIO0)</text>
 
-  <!-- RIGHT side pins (top→bottom): 5V, GND, 3V3, D10, D9, D8, D7 -->
-  <!-- 5V/VBUS -->
-  <line x1="460" y1="190" x2="480" y2="190" stroke="#888780" stroke-width="1"/>
-  <text x="485" y="190" font-family="sans-serif" font-size="9" fill="#26215C" dominant-baseline="central">5V/VBUS</text>
-  <!-- GND -->
-  <line x1="460" y1="226" x2="480" y2="226" stroke="#888780" stroke-width="1"/>
-  <text x="485" y="226" font-family="sans-serif" font-size="9" fill="#26215C" dominant-baseline="central">GND</text>
-  <!-- 3V3 -->
-  <line x1="460" y1="262" x2="480" y2="262" stroke="#888780" stroke-width="1"/>
-  <text x="485" y="262" font-family="sans-serif" font-size="9" fill="#26215C" dominant-baseline="central">3V3</text>
-  <!-- D10..D7 (not used) -->
-  <line x1="460" y1="298" x2="472" y2="298" stroke="#B4B2A9" stroke-width="0.5"/>
-  <text x="475" y="298" font-family="sans-serif" font-size="8" fill="#B4B2A9" dominant-baseline="central">D10</text>
-  <line x1="460" y1="334" x2="472" y2="334" stroke="#B4B2A9" stroke-width="0.5"/>
-  <text x="475" y="334" font-family="sans-serif" font-size="8" fill="#B4B2A9" dominant-baseline="central">D9</text>
-  <line x1="460" y1="370" x2="472" y2="370" stroke="#B4B2A9" stroke-width="0.5"/>
-  <text x="475" y="370" font-family="sans-serif" font-size="8" fill="#B4B2A9" dominant-baseline="central">D8</text>
-  <line x1="460" y1="406" x2="472" y2="406" stroke="#B4B2A9" stroke-width="0.5"/>
-  <text x="475" y="406" font-family="sans-serif" font-size="8" fill="#B4B2A9" dominant-baseline="central">D7/RX</text>
+  <line x1="300" y1="226" x2="280" y2="226" stroke="#BA7517" stroke-width="1.2"/>
+  <text x="275" y="226" text-anchor="end" font-family="sans-serif" font-size="9" fill="#BA7517" dominant-baseline="central">A1 (GPIO1)</text>
 
-  <!-- BAT pads callout — bottom of board -->
-  <rect x="330" y="472" width="100" height="24" rx="4" fill="#C0DD97" stroke="#3B6D11" stroke-width="0.5"/>
-  <text x="380" y="484" text-anchor="middle" font-family="sans-serif" font-size="9" font-weight="500" fill="#173404" dominant-baseline="central">BAT pads (underside)</text>
-  <!-- dashed line from bottom of board to callout -->
-  <line x1="380" y1="460" x2="380" y2="472" stroke="#3B6D11" stroke-width="0.8" stroke-dasharray="3 2"/>
-  <!-- BAT+/BAT- wire connections come from bottom -->
-  <line x1="350" y1="460" x2="350" y2="472" stroke="#1D9E75" stroke-width="1.5"/>
-  <line x1="410" y1="460" x2="410" y2="472" stroke="#888780" stroke-width="1.5"/>
-  <text x="344" y="468" text-anchor="end" font-family="sans-serif" font-size="8" fill="#1D9E75" dominant-baseline="central">BAT+</text>
-  <text x="416" y="468" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">BAT-</text>
+  <line x1="300" y1="262" x2="290" y2="262" stroke="#888780" stroke-width="0.5"/>
+  <text x="287" y="262" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D2</text>
+  <line x1="300" y1="298" x2="290" y2="298" stroke="#888780" stroke-width="0.5"/>
+  <text x="287" y="298" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D3</text>
+  <line x1="300" y1="334" x2="290" y2="334" stroke="#888780" stroke-width="0.5"/>
+  <text x="287" y="334" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D4</text>
+  <line x1="300" y1="370" x2="290" y2="370" stroke="#888780" stroke-width="0.5"/>
+  <text x="287" y="370" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D5</text>
+  <line x1="300" y1="406" x2="290" y2="406" stroke="#888780" stroke-width="0.5"/>
+  <text x="287" y="406" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D6/TX</text>
 
-  <!-- Sleep note inside board -->
-  <text x="380" y="430" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#534AB7">deep sleep 15 min</text>
-  <text x="380" y="442" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#534AB7">OTA 5s on each wake</text>
+  <!-- RIGHT side pins: 5V, GND, 3V3, then unused -->
+  <line x1="460" y1="190" x2="480" y2="190" stroke="#888780" stroke-width="0.8"/>
+  <text x="485" y="190" font-family="sans-serif" font-size="9" fill="#888780" dominant-baseline="central">5V/VBUS</text>
 
-  <!-- ═══ 18650 Battery (top-left) ═══ -->
-  <rect x="20" y="20" width="140" height="68" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
-  <text x="90" y="42" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="500" fill="#2C2C2A">18650 cell</text>
+  <line x1="460" y1="226" x2="480" y2="226" stroke="#888780" stroke-width="1.2"/>
+  <text x="485" y="226" font-family="sans-serif" font-size="9" fill="#888780" dominant-baseline="central">GND</text>
+
+  <line x1="460" y1="262" x2="480" y2="262" stroke="#1D9E75" stroke-width="1.2"/>
+  <text x="485" y="262" font-family="sans-serif" font-size="9" fill="#1D9E75" dominant-baseline="central">3V3</text>
+
+  <line x1="460" y1="298" x2="470" y2="298" stroke="#888780" stroke-width="0.5"/>
+  <text x="473" y="298" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D10</text>
+  <line x1="460" y1="334" x2="470" y2="334" stroke="#888780" stroke-width="0.5"/>
+  <text x="473" y="334" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D9</text>
+  <line x1="460" y1="370" x2="470" y2="370" stroke="#888780" stroke-width="0.5"/>
+  <text x="473" y="370" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D8</text>
+  <line x1="460" y1="406" x2="470" y2="406" stroke="#888780" stroke-width="0.5"/>
+  <text x="473" y="406" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D7/RX</text>
+
+  <!-- Board notes -->
+  <text x="380" y="432" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#534AB7">deep sleep 15 min</text>
+  <text x="380" y="444" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#534AB7">OTA 5s on each wake</text>
+
+  <!-- BAT pads callout — below board, centre -->
+  <rect x="326" y="474" width="108" height="22" rx="4" fill="none" stroke="#1D9E75" stroke-width="1"/>
+  <text x="380" y="485" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#1D9E75" dominant-baseline="central">BAT pads (underside)</text>
+  <line x1="350" y1="460" x2="350" y2="474" stroke="#1D9E75" stroke-width="1.5" stroke-dasharray="3 2"/>
+  <line x1="410" y1="460" x2="410" y2="474" stroke="#888780" stroke-width="1.5" stroke-dasharray="3 2"/>
+  <text x="344" y="467" text-anchor="end" font-family="sans-serif" font-size="8" fill="#1D9E75" dominant-baseline="central">BAT+</text>
+  <text x="416" y="467" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">BAT-</text>
+
+  <!-- ═══ 18650 Battery ═══ -->
+  <rect x="20" y="20" width="140" height="68" rx="8" fill="none" stroke="#5F5E5A" stroke-width="1"/>
+  <text x="90" y="42" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="500" fill="#5F5E5A">18650 cell</text>
   <text x="90" y="58" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#5F5E5A">3.7V · 2000mAh</text>
-  <text x="90" y="74" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#5F5E5A">protected recommended</text>
-  <!-- Battery terminal stubs right -->
-  <line x1="160" y1="38" x2="178" y2="38" stroke="#5F5E5A" stroke-width="1"/>
-  <line x1="160" y1="68" x2="178" y2="68" stroke="#5F5E5A" stroke-width="1"/>
-  <text x="164" y="33" font-family="sans-serif" font-size="9" fill="#1D9E75" dominant-baseline="central">+</text>
-  <text x="164" y="63" font-family="sans-serif" font-size="9" fill="#888780" dominant-baseline="central">-</text>
+  <text x="90" y="72" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#5F5E5A">protected recommended</text>
+  <line x1="160" y1="36" x2="178" y2="36" stroke="#1D9E75" stroke-width="1.5"/>
+  <line x1="160" y1="66" x2="178" y2="66" stroke="#888780" stroke-width="1.5"/>
+  <text x="163" y="32" font-family="sans-serif" font-size="9" fill="#1D9E75" dominant-baseline="central">+</text>
+  <text x="163" y="62" font-family="sans-serif" font-size="9" fill="#888780" dominant-baseline="central">-</text>
 
-  <!-- ═══ 1N5819 Diode (top-centre) ═══ -->
-  <rect x="208" y="26" width="100" height="34" rx="6" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
-  <text x="258" y="40" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="500" fill="#412402">1N5819</text>
-  <text x="258" y="52" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#633806">Schottky · anode left</text>
-  <text x="206" y="43" text-anchor="end" font-family="sans-serif" font-size="8" fill="#1D9E75" dominant-baseline="central">A</text>
-  <text x="310" y="43" font-family="sans-serif" font-size="8" fill="#1D9E75" dominant-baseline="central">K</text>
+  <!-- ═══ 1N5819 Diode ═══ -->
+  <rect x="208" y="24" width="100" height="34" rx="6" fill="none" stroke="#854F0B" stroke-width="1"/>
+  <text x="258" y="38" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="500" fill="#854F0B">1N5819</text>
+  <text x="258" y="51" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#854F0B">Schottky · anode left</text>
+  <text x="206" y="41" text-anchor="end" font-family="sans-serif" font-size="8" fill="#1D9E75" dominant-baseline="central">A</text>
+  <text x="310" y="41" font-family="sans-serif" font-size="8" fill="#1D9E75" dominant-baseline="central">K</text>
 
   <!-- Battery + → diode anode -->
-  <path d="M178 38 L208 38" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
+  <path d="M178 36 L208 36" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
 
-  <!-- Diode cathode → power junction node at top -->
-  <path d="M308 38 L350 38" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
-  <!-- Junction node dot -->
-  <circle cx="350" cy="38" r="3.5" fill="#1D9E75"/>
+  <!-- Diode cathode → power rail junction -->
+  <path d="M308 36 L350 36" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
+  <circle cx="350" cy="36" r="3.5" fill="#1D9E75"/>
 
-  <!-- Power junction → down to BAT+ pad (left of centre, bottom of board) -->
-  <path d="M350 38 L350 460" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
+  <!-- Power rail → BAT+ pad (straight down left side) -->
+  <path d="M350 36 L350 474" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
 
-  <!-- Power junction → right to voltage divider top -->
-  <path d="M350 38 L660 38 L660 130" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
-  <!-- Junction dot where divider taps off -->
-  <circle cx="660" cy="38" r="3.5" fill="#1D9E75"/>
+  <!-- Power rail → voltage divider (right and down) -->
+  <path d="M350 36 L660 36 L660 130" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
+  <circle cx="660" cy="36" r="3.5" fill="#1D9E75"/>
 
-  <!-- Battery - → GND rail -->
-  <path d="M178 68 L190 68 L190 500 L410 500 L410 496" fill="none" stroke="#888780" stroke-width="1.5"/>
-  <!-- GND junction dot -->
-  <circle cx="410" cy="496" r="3.5" fill="#888780"/>
+  <!-- Battery - → GND rail (down and right, meets at y=510) -->
+  <path d="M178 66 L190 66 L190 510 L410 510" fill="none" stroke="#888780" stroke-width="1.5"/>
+  <circle cx="410" cy="510" r="3.5" fill="#888780"/>
 
-  <!-- GND rail → XIAO GND pin (right side, 2nd from top = y226) — route outside right -->
-  <path d="M540 226 L560 226 L560 500 L410 500" fill="none" stroke="#888780" stroke-width="1.5"/>
-  <!-- Junction on GND rail -->
-  <circle cx="560" cy="500" r="3.5" fill="#888780"/>
+  <!-- GND rail → BAT- pad -->
+  <path d="M410 510 L410 496" fill="none" stroke="#888780" stroke-width="1.5"/>
+
+  <!-- GND rail → XIAO GND pin (right side y=226, route outside right) -->
+  <path d="M540 226 L560 226 L560 510 L410 510" fill="none" stroke="#888780" stroke-width="1.5"/>
+  <circle cx="560" cy="510" r="3.5" fill="#888780"/>
 
   <!-- ═══ Voltage Divider (far right) ═══ -->
-  <!-- R1: power junction → midpoint -->
-  <rect x="620" y="130" width="100" height="32" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
-  <text x="670" y="146" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="500" fill="#04342C">200kΩ R1</text>
+  <!-- R1 -->
+  <rect x="620" y="130" width="100" height="32" rx="6" fill="none" stroke="#1D9E75" stroke-width="1"/>
+  <text x="670" y="146" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="500" fill="#1D9E75" dominant-baseline="central">200kΩ R1</text>
 
   <!-- R1 bottom → midpoint -->
-  <line x1="670" y1="162" x2="670" y2="202" stroke="#1D9E75" stroke-width="1.5"/>
+  <line x1="670" y1="162" x2="670" y2="200" stroke="#1D9E75" stroke-width="1.5"/>
 
-  <!-- Midpoint dot -->
-  <circle cx="670" cy="202" r="3.5" fill="#BA7517"/>
-  <text x="728" y="202" text-anchor="end" font-family="sans-serif" font-size="8" fill="#BA7517" dominant-baseline="central">midpoint</text>
+  <!-- Midpoint -->
+  <circle cx="670" cy="200" r="3.5" fill="#BA7517"/>
+  <text x="730" y="200" text-anchor="end" font-family="sans-serif" font-size="8" fill="#BA7517" dominant-baseline="central">midpoint</text>
 
-  <!-- R2: midpoint → GND -->
-  <rect x="620" y="212" width="100" height="32" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
-  <text x="670" y="228" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="500" fill="#04342C">200kΩ R2</text>
+  <!-- R2 -->
+  <rect x="620" y="210" width="100" height="32" rx="6" fill="none" stroke="#888780" stroke-width="1"/>
+  <text x="670" y="226" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="500" fill="#888780" dominant-baseline="central">200kΩ R2</text>
 
-  <!-- Midpoint → top of R2 -->
-  <line x1="670" y1="202" x2="670" y2="212" stroke="#888780" stroke-width="1.5"/>
+  <!-- Midpoint → R2 top -->
+  <line x1="670" y1="200" x2="670" y2="210" stroke="#888780" stroke-width="1.5"/>
 
   <!-- R2 bottom → GND rail -->
-  <path d="M670 244 L670 500 L560 500" fill="none" stroke="#888780" stroke-width="1.5"/>
+  <path d="M670 242 L670 510 L560 510" fill="none" stroke="#888780" stroke-width="1.5"/>
 
-  <!-- Midpoint → A0 on XIAO left side (route outside left board edge, connect to y=190) -->
-  <path d="M670 202 L670 190 L540 190 L540 190" fill="none" stroke="#BA7517" stroke-width="1.5"/>
-  <!-- Continue: route down outside left to A0 pin -->
-  <path d="M540 190 L280 190" fill="none" stroke="#BA7517" stroke-width="1.5"/>
+  <!-- Midpoint → A0 (route outside, along top then down left side of board) -->
+  <path d="M670 200 L670 190 L540 190 L540 190 L280 190" fill="none" stroke="#BA7517" stroke-width="1.5"/>
 
-  <!-- ═══ HW-390 Moisture Sensor (bottom-left) ═══ -->
-  <rect x="20" y="430" width="160" height="88" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
-  <text x="100" y="454" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="500" fill="#04342C">HW-390</text>
-  <text x="100" y="470" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#085041">capacitive moisture</text>
-  <text x="100" y="484" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#085041">insert to white line only</text>
-  <text x="100" y="498" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#085041">approx 200mm cable</text>
+  <!-- ═══ HW-390 Moisture Sensor ═══ -->
+  <rect x="20" y="430" width="160" height="88" rx="8" fill="none" stroke="#1D9E75" stroke-width="1"/>
+  <text x="100" y="453" text-anchor="middle" font-family="sans-serif" font-size="12" font-weight="500" fill="#1D9E75">HW-390</text>
+  <text x="100" y="468" text-anchor="middle" font-family="sans-serif" font-size="9" fill="#1D9E75">capacitive moisture</text>
+  <text x="100" y="482" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#1D9E75">insert to white line only</text>
+  <text x="100" y="496" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#1D9E75">approx 200mm cable</text>
 
-  <!-- Sensor pin stubs right -->
-  <line x1="180" y1="450" x2="200" y2="450" stroke="#888780" stroke-width="1"/>
-  <line x1="180" y1="468" x2="200" y2="468" stroke="#888780" stroke-width="1"/>
-  <line x1="180" y1="486" x2="200" y2="486" stroke="#888780" stroke-width="1"/>
-  <text x="184" y="446" font-family="sans-serif" font-size="9" fill="#1D9E75" dominant-baseline="central">VCC</text>
-  <text x="184" y="464" font-family="sans-serif" font-size="9" fill="#888780" dominant-baseline="central">GND</text>
-  <text x="184" y="482" font-family="sans-serif" font-size="9" fill="#BA7517" dominant-baseline="central">AOUT</text>
+  <!-- Sensor pin stubs -->
+  <line x1="180" y1="450" x2="200" y2="450" stroke="#1D9E75" stroke-width="1.2"/>
+  <text x="204" y="450" font-family="sans-serif" font-size="9" fill="#1D9E75" dominant-baseline="central">VCC</text>
 
-  <!-- Sensor VCC → 3V3 (right side of XIAO y=262) — route outside right -->
+  <line x1="180" y1="468" x2="200" y2="468" stroke="#888780" stroke-width="1.2"/>
+  <text x="204" y="468" font-family="sans-serif" font-size="9" fill="#888780" dominant-baseline="central">GND</text>
+
+  <line x1="180" y1="486" x2="200" y2="486" stroke="#BA7517" stroke-width="1.2"/>
+  <text x="204" y="486" font-family="sans-serif" font-size="9" fill="#BA7517" dominant-baseline="central">AOUT</text>
+
+  <!-- Sensor VCC → 3V3 (right side of XIAO y=262) — route outside right via bottom -->
   <path d="M200 450 L216 450 L216 560 L550 560 L550 262 L480 262" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
 
-  <!-- Sensor GND → GND rail at y=500 -->
-  <path d="M200 468 L214 468 L214 500 L190 500" fill="none" stroke="#888780" stroke-width="1.5"/>
-  <!-- Junction on GND rail -->
-  <circle cx="214" cy="500" r="3.5" fill="#888780"/>
+  <!-- Sensor GND → GND rail -->
+  <path d="M200 468 L214 468 L214 510 L190 510" fill="none" stroke="#888780" stroke-width="1.5"/>
+  <circle cx="214" cy="510" r="3.5" fill="#888780"/>
 
-  <!-- Sensor AOUT → A1 (left side y=226) — route outside left, above sensor -->
-  <path d="M200 486 L220 486 L220 420 L260 420 L260 226 L280 226" fill="none" stroke="#BA7517" stroke-width="1.5"/>
+  <!-- Sensor AOUT → A1 (left side y=226) — route outside left -->
+  <path d="M200 486 L220 486 L220 416 L260 416 L260 226 L280 226" fill="none" stroke="#BA7517" stroke-width="1.5"/>
 
   <!-- ═══ Legend ═══ -->
-  <rect x="20" y="598" width="720" height="30" rx="6" fill="none" stroke="#D3D1C7" stroke-width="0.5"/>
-  <line x1="36" y1="613" x2="60" y2="613" stroke="#1D9E75" stroke-width="2"/>
-  <text x="66" y="613" font-family="sans-serif" font-size="9" fill="#2C2C2A" dominant-baseline="central">VCC / BAT+</text>
-  <line x1="150" y1="613" x2="174" y2="613" stroke="#888780" stroke-width="2"/>
-  <text x="180" y="613" font-family="sans-serif" font-size="9" fill="#2C2C2A" dominant-baseline="central">GND</text>
-  <line x1="228" y1="613" x2="252" y2="613" stroke="#BA7517" stroke-width="2"/>
-  <text x="258" y="613" font-family="sans-serif" font-size="9" fill="#2C2C2A" dominant-baseline="central">Analog / divider midpoint</text>
-  <line x1="420" y1="613" x2="444" y2="613" stroke="#B4B2A9" stroke-width="1"/>
-  <text x="450" y="613" font-family="sans-serif" font-size="9" fill="#2C2C2A" dominant-baseline="central">Unused pins (reference only)</text>
-  <text x="738" y="613" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">github.com/mcleancraig/moisture-sensor-esp32</text>
+  <rect x="20" y="596" width="720" height="32" rx="6" fill="none" stroke="#888780" stroke-width="0.5"/>
+  <line x1="36" y1="612" x2="60" y2="612" stroke="#1D9E75" stroke-width="2"/>
+  <text x="66" y="612" font-family="sans-serif" font-size="9" fill="#1D9E75" dominant-baseline="central">VCC / BAT+</text>
+  <line x1="152" y1="612" x2="176" y2="612" stroke="#888780" stroke-width="2"/>
+  <text x="182" y="612" font-family="sans-serif" font-size="9" fill="#888780" dominant-baseline="central">GND</text>
+  <line x1="226" y1="612" x2="250" y2="612" stroke="#BA7517" stroke-width="2"/>
+  <text x="256" y="612" font-family="sans-serif" font-size="9" fill="#BA7517" dominant-baseline="central">Analog / divider midpoint</text>
+  <line x1="420" y1="612" x2="444" y2="612" stroke="#854F0B" stroke-width="2"/>
+  <text x="450" y="612" font-family="sans-serif" font-size="9" fill="#854F0B" dominant-baseline="central">Diode</text>
+  <line x1="498" y1="612" x2="522" y2="612" stroke="#888780" stroke-width="1" stroke-dasharray="3 2"/>
+  <text x="528" y="612" font-family="sans-serif" font-size="9" fill="#888780" dominant-baseline="central">Unused pins / BAT pads</text>
+  <text x="738" y="612" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">github.com/mcleancraig/moisture-sensor-esp32</text>
 </svg>
