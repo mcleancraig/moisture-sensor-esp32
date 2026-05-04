@@ -3,19 +3,27 @@
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
+#include <ArduinoOTA.h>
 #include "esp_mac.h"
+#include <ESPmDNS.h>
 
 // ═══════════════════════════════════════════════════════════
-//  v2.0.0 — captive portal config on first boot
-//  All settings stored in NVS via Preferences library
-//  No secrets.h or hardcoded config needed
+//  v2.0.0
+//  - Captive portal config on first boot
+//  - Boot button hold to reconfigure without reflashing
+//  - OTA firmware updates over WiFi
+//  - Firmware version in MQTT payload
+//  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
+
+#define FIRMWARE_VERSION "2.0.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
 const int BATTERY_PIN  = 1;   // A1 — voltage divider midpoint
+const int BTN_BOOT     = 9;   // Boot button on XIAO ESP32-C6
 
-// ── Fixed calibration (adjust per sensor) ────────────────
+// ── Fixed calibration ─────────────────────────────────────
 const int   DRY_MV         = 2800;
 const int   WET_MV         = 1000;
 const float DIVIDER_RATIO  = 2.0;
@@ -23,12 +31,15 @@ const float BAT_CAL_OFFSET = 0.0;
 const float BAT_MIN        = 2.5;
 const float BAT_MAX        = 4.3;
 
-// ── Deep sleep ────────────────────────────────────────────
-const int SLEEP_MINUTES    = 15;
+// ── Timing ────────────────────────────────────────────────
+const int SLEEP_MINUTES      = 15;
+const int AP_TIMEOUT_MIN     = 10;
+const int AP_SLEEP_MIN       = 10;
+const int BOOT_HOLD_MS       = 3000;   // hold boot button this long to reconfigure
+const int OTA_WAIT_MS        = 5000;  // stay awake this long for OTA after connect
 
-// ── AP config portal timing ───────────────────────────────
-const int AP_TIMEOUT_MIN   = 10;
-const int AP_SLEEP_MIN     = 10;
+// ── AP credentials ────────────────────────────────────────
+const char* AP_PASSWORD      = "moisture";   // min 8 chars required by WPA2
 
 // ── HA discovery prefix ───────────────────────────────────
 const char* HA_DISCOVERY_PREFIX = "homeassistant";
@@ -40,15 +51,15 @@ const char* HA_DISCOVERY_PREFIX = "homeassistant";
 Preferences prefs;
 
 struct Config {
-  int   sensorNumber;
-  char  wifiSSID[64];
-  char  wifiPassword[64];
-  bool  staticIP;
-  uint8_t ip[4];        // full static IP, all four octets
-  char  mqttBroker[64];
-  int   mqttPort;
-  char  mqttUser[32];
-  char  mqttPassword[64];
+  int     sensorNumber;
+  char    wifiSSID[64];
+  char    wifiPassword[64];
+  bool    staticIP;
+  uint8_t ip[4];
+  char    mqttBroker[64];
+  int     mqttPort;
+  char    mqttUser[32];
+  char    mqttPassword[64];
 } cfg;
 
 bool configLoaded = false;
@@ -72,13 +83,20 @@ void loadConfig() {
   configLoaded = (cfg.sensorNumber > 0 && strlen(cfg.wifiSSID) > 0);
 }
 
+void clearConfig() {
+  prefs.begin("sensor", false);
+  prefs.clear();
+  prefs.end();
+  Serial.println("Config    — NVS cleared");
+}
+
 void saveConfig(int sensorNum,
                 const char* ssid, const char* wifiPass,
                 bool staticIp, uint8_t ip0, uint8_t ip1, uint8_t ip2, uint8_t ip3,
                 const char* broker, int port,
                 const char* user, const char* mqttPass) {
   prefs.begin("sensor", false);
-  prefs.putInt("sensorNum",  sensorNum);
+  prefs.putInt("sensorNum",   sensorNum);
   prefs.putString("wifiSSID",  ssid);
   prefs.putString("wifiPass",  wifiPass);
   prefs.putBool("staticIP",    staticIp);
@@ -111,9 +129,9 @@ void buildDerivedConfig() {
   snprintf(STATE_TOPIC, sizeof(STATE_TOPIC), "garden/%s/state",           SENSOR_ID);
   snprintf(DISC_MOISTURE, sizeof(DISC_MOISTURE),
     "%s/sensor/%s_moisture/config",    HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_BAT_V,    sizeof(DISC_BAT_V),
+  snprintf(DISC_BAT_V, sizeof(DISC_BAT_V),
     "%s/sensor/%s_battery_v/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_BAT_PCT,  sizeof(DISC_BAT_PCT),
+  snprintf(DISC_BAT_PCT, sizeof(DISC_BAT_PCT),
     "%s/sensor/%s_battery_pct/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
 }
 
@@ -135,7 +153,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
   h1{font-size:1.3em;color:#2c7a4b;margin-bottom:4px}
   p.sub{color:#666;font-size:.85em;margin-top:0}
   label{display:block;margin-top:14px;font-size:.9em;color:#333;font-weight:600}
-  input,select{width:100%;padding:8px;margin-top:4px;border:1px solid #ccc;
+  input{width:100%;padding:8px;margin-top:4px;border:1px solid #ccc;
     border-radius:6px;font-size:1em;box-sizing:border-box}
   .optional{color:#888;font-weight:400;font-size:.8em}
   .section{background:#fff;border-radius:10px;padding:16px;margin:16px 0;
@@ -177,9 +195,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
     <div class="chk-row">
       <input type="checkbox" name="staticIP" id="staticChk"
         onchange="toggleIP(this)">
-      <label for="staticChk" style="margin:0;font-weight:600">
-        Use static IP
-      </label>
+      <label for="staticChk" style="margin:0;font-weight:600">Use static IP</label>
     </div>
     <div id="ip-row">
       <label>Static IP address</label>
@@ -243,14 +259,33 @@ const char SAVED_HTML[] PROGMEM = R"rawhtml(
 <style>
   body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:0 16px;
     text-align:center;background:#f5f5f5}
-  h1{color:#2c7a4b}
-  p{color:#555}
+  h1{color:#2c7a4b}p{color:#555}
 </style>
 </head>
 <body>
 <h1>Saved!</h1>
 <p>Configuration saved. The sensor will restart and connect to your network.</p>
 <p><small>You can close this page.</small></p>
+</body>
+</html>
+)rawhtml";
+
+const char RECONFIG_HTML[] PROGMEM = R"rawhtml(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reconfiguring</title>
+<style>
+  body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:0 16px;
+    text-align:center;background:#f5f5f5}
+  h1{color:#2c7a4b}p{color:#555}
+</style>
+</head>
+<body>
+<h1>Reconfiguring...</h1>
+<p>Config cleared. The sensor is restarting into setup mode.</p>
+<p><small>Reconnect to the MOISTURE_ network to reconfigure.</small></p>
 </body>
 </html>
 )rawhtml";
@@ -269,7 +304,6 @@ void handleSave() {
   int  port      = server.arg("mqttPort").toInt();
   if (port == 0) port = 1883;
 
-  // Parse all four IP octets — default to 192.168.220.<sensorNum>
   uint8_t ip0 = staticIp ? server.arg("ip1").toInt() : 192;
   uint8_t ip1 = staticIp ? server.arg("ip2").toInt() : 168;
   uint8_t ip2 = staticIp ? server.arg("ip3").toInt() : 220;
@@ -279,8 +313,7 @@ void handleSave() {
     sensorNum,
     server.arg("ssid").c_str(),
     server.arg("wifiPass").c_str(),
-    staticIp,
-    ip0, ip1, ip2, ip3,
+    staticIp, ip0, ip1, ip2, ip3,
     server.arg("mqttBroker").c_str(),
     port,
     server.arg("mqttUser").c_str(),
@@ -292,8 +325,14 @@ void handleSave() {
   ESP.restart();
 }
 
+void handleReconfig() {
+  server.send_P(200, "text/html", RECONFIG_HTML);
+  delay(1500);
+  clearConfig();
+  ESP.restart();
+}
+
 void handleNotFound() {
-  // Redirect everything to root — captive portal behaviour
   server.sendHeader("Location", "http://192.168.4.1/", true);
   server.send(302, "text/plain", "");
 }
@@ -303,8 +342,6 @@ void handleNotFound() {
 // ═══════════════════════════════════════════════════════════
 
 void startConfigPortal() {
-  // Use esp_efuse to read MAC before WiFi stack is initialised
-  // — fixes all-zeros bug in ESP32 Arduino core v3.x
   uint8_t mac[6];
   esp_efuse_mac_get_default(mac);
   char apName[32];
@@ -312,19 +349,20 @@ void startConfigPortal() {
     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
   Serial.printf("Portal    — starting AP: %s\n", apName);
+  Serial.printf("Portal    — password: %s\n", AP_PASSWORD);
+
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(apName);
+  WiFi.softAP(apName, AP_PASSWORD);
 
   IPAddress apIP = WiFi.softAPIP();
   Serial.printf("Portal    — IP: %s\n", apIP.toString().c_str());
   Serial.printf("Portal    — will close in %d minutes\n", AP_TIMEOUT_MIN);
 
-  // DNS spoofing — redirects all domains to our IP
-  // triggers captive portal popup on iOS and Android automatically
   dnsServer.start(53, "*", apIP);
 
-  server.on("/",     HTTP_GET,  handleRoot);
-  server.on("/save", HTTP_POST, handleSave);
+  server.on("/",         HTTP_GET,  handleRoot);
+  server.on("/save",     HTTP_POST, handleSave);
+  server.on("/reconfig", HTTP_POST, handleReconfig);
   server.onNotFound(handleNotFound);
   server.begin();
 
@@ -336,7 +374,6 @@ void startConfigPortal() {
     delay(10);
   }
 
-  // Timed out — sleep then restart to retry WiFi
   server.stop();
   dnsServer.stop();
   WiFi.softAPdisconnect(true);
@@ -344,6 +381,38 @@ void startConfigPortal() {
   Serial.flush();
   esp_sleep_enable_timer_wakeup((uint64_t)AP_SLEEP_MIN * 60 * 1000000ULL);
   esp_deep_sleep_start();
+}
+
+// ═══════════════════════════════════════════════════════════
+//  OTA
+// ═══════════════════════════════════════════════════════════
+
+void setupOTA() {
+  // mDNS is required for the IDE to discover and communicate with the device
+  if (!MDNS.begin(SENSOR_ID)) {
+    Serial.println("OTA       — mDNS failed to start");
+  }
+  // OTA hostname is sensor ID so it shows up clearly in IDE
+  ArduinoOTA.setHostname(SENSOR_ID);
+
+  // OTA password matches AP password for consistency
+  ArduinoOTA.setPassword(AP_PASSWORD);
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("OTA       — starting update");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("OTA       — complete, restarting");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("OTA       — %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("OTA       — error [%u]\n", error);
+  });
+
+  ArduinoOTA.begin();
+  Serial.printf("OTA       — ready, hostname: %s\n", SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -391,28 +460,21 @@ float readBatteryVoltage(int &rawMv) {
 }
 
 int batteryPercent(float voltage) {
-  // 18650 discharge curve — piecewise linear interpolation
-  // Voltage points and corresponding percentages
-  // Based on typical Li-ion discharge at low current (matches our use case well)
+  // Piecewise linear interpolation from real 18650 discharge curve
   const float v[] = { 3.00, 3.10, 3.25, 3.50, 3.60, 3.70, 3.80, 3.90, 4.00, 4.10, 4.20 };
   const int   p[] = {    0,    5,   10,   20,   35,   50,   65,   80,   90,   95,  100 };
   const int   n   = sizeof(v) / sizeof(v[0]);
 
-  // Below minimum — dead
-  if (voltage <= v[0]) return 0;
-
-  // Above maximum — full
+  if (voltage <= v[0])   return 0;
   if (voltage >= v[n-1]) return 100;
 
-  // Find which segment we're in and interpolate
   for (int i = 0; i < n - 1; i++) {
     if (voltage >= v[i] && voltage < v[i+1]) {
       float ratio = (voltage - v[i]) / (v[i+1] - v[i]);
       return (int)(p[i] + ratio * (p[i+1] - p[i]));
     }
   }
-
-  return 0;  // fallback — should never reach here
+  return 0;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -423,9 +485,9 @@ bool connectWifi() {
   WiFi.mode(WIFI_STA);
 
   if (cfg.staticIP) {
-    IPAddress ip (cfg.ip[0], cfg.ip[1], cfg.ip[2], cfg.ip[3]);
-    IPAddress gw (cfg.ip[0], cfg.ip[1], cfg.ip[2], 1);
-    IPAddress sn (255, 255, 0, 0);
+    IPAddress ip(cfg.ip[0], cfg.ip[1], cfg.ip[2], cfg.ip[3]);
+    IPAddress gw(cfg.ip[0], cfg.ip[1], cfg.ip[2], 1);
+    IPAddress sn(255, 255, 0, 0);
     if (!WiFi.config(ip, gw, sn, gw)) {
       Serial.println("WiFi      — static IP config failed");
     }
@@ -488,15 +550,16 @@ void connectMqtt() {
 // ═══════════════════════════════════════════════════════════
 
 void publishDiscovery() {
-  char device[192];
+  char device[256];
   snprintf(device, sizeof(device),
     "\"device\":{"
       "\"identifiers\":[\"%s\"],"
       "\"name\":\"%s\","
       "\"model\":\"ESP32-C6 Soil Sensor\","
-      "\"manufacturer\":\"DIY\""
+      "\"manufacturer\":\"DIY\","
+      "\"sw_version\":\"%s\""
     "}",
-    SENSOR_ID, SENSOR_NAME);
+    SENSOR_ID, SENSOR_NAME, FIRMWARE_VERSION);
 
   char payload[512];
 
@@ -539,8 +602,29 @@ void setup() {
   delay(100);
   Serial.println("\n╔══════════════════════════╗");
   Serial.println(  "║   Garden Sensor Boot     ║");
+  Serial.printf(   "║   Firmware v%-12s ║\n", FIRMWARE_VERSION);
   Serial.println(  "╚══════════════════════════╝");
 
+  // ── Boot button check — hold for 3s to force reconfiguration ──
+  pinMode(BTN_BOOT, INPUT_PULLUP);
+  delay(100);
+  if (digitalRead(BTN_BOOT) == LOW) {
+    Serial.println("Config    — boot button held, waiting to confirm...");
+    unsigned long holdStart = millis();
+    while (digitalRead(BTN_BOOT) == LOW) {
+      if (millis() - holdStart >= BOOT_HOLD_MS) {
+        Serial.println("Config    — confirmed, clearing config");
+        clearConfig();
+        delay(200);
+        startConfigPortal();
+        return;
+      }
+      delay(50);
+    }
+    Serial.println("Config    — button released early, continuing normal boot");
+  }
+
+  // ── Load config ───────────────────────────────────────────
   loadConfig();
 
   if (!configLoaded) {
@@ -553,7 +637,7 @@ void setup() {
   Serial.printf("Config    — sensor%d, SSID: %s, broker: %s\n",
     cfg.sensorNumber, cfg.wifiSSID, cfg.mqttBroker);
 
-  // Read sensors before WiFi — radio noise affects ADC
+  // ── Read sensors before WiFi — radio noise affects ADC ───
   int   moistureRawMv = readMoisture();
   int   moisturePct   = map(moistureRawMv, DRY_MV, WET_MV, 0, 100);
   moisturePct         = constrain(moisturePct, 0, 100);
@@ -562,32 +646,44 @@ void setup() {
   float batV     = readBatteryVoltage(batRawMv);
   int   batPct   = (batV > 0) ? batteryPercent(batV) : -1;
 
-  // Try WiFi — open portal if it fails (handles transient outages)
+  // ── Connect WiFi — open portal if it fails ────────────────
   if (!connectWifi()) {
     Serial.println("Config    — WiFi failed, starting portal");
     startConfigPortal();
     return;
   }
 
+  // ── OTA — stay awake briefly to accept waiting updates ───
+  setupOTA();
+  Serial.printf("OTA       — listening for %dms\n", OTA_WAIT_MS);
+  unsigned long otaDeadline = millis() + OTA_WAIT_MS;
+  while (millis() < otaDeadline) {
+    ArduinoOTA.handle();
+    delay(10);
+  }
+
+  // ── MQTT ─────────────────────────────────────────────────
   connectMqtt();
   publishDiscovery();
 
   if (mqtt.connected()) {
-    char payload[256];
+    char payload[320];
     if (batV > 0) {
       snprintf(payload, sizeof(payload),
         "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
         "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":%.2f,"
-        "\"battery_pct\":%d,\"battery_raw_mv\":%d}",
+        "\"battery_pct\":%d,\"battery_raw_mv\":%d,\"fw\":\"%s\"}",
         SENSOR_ID, moisturePct, moistureRawMv,
-        DRY_MV, WET_MV, batV, batPct, batRawMv);
+        DRY_MV, WET_MV, batV, batPct, batRawMv,
+        FIRMWARE_VERSION);
     } else {
       snprintf(payload, sizeof(payload),
         "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
         "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":null,"
-        "\"battery_pct\":null,\"battery_raw_mv\":%d}",
+        "\"battery_pct\":null,\"battery_raw_mv\":%d,\"fw\":\"%s\"}",
         SENSOR_ID, moisturePct, moistureRawMv,
-        DRY_MV, WET_MV, batRawMv);
+        DRY_MV, WET_MV, batRawMv,
+        FIRMWARE_VERSION);
     }
     bool ok = mqtt.publish(STATE_TOPIC, payload, true);
     Serial.printf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
