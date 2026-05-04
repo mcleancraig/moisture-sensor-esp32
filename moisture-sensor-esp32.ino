@@ -160,6 +160,8 @@ char STATE_TOPIC[64];
 char DISC_MOISTURE[128];
 char DISC_BAT_V[128];
 char DISC_BAT_PCT[128];
+char DISC_TS[128];
+
 
 void buildDerivedConfig() {
   snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.sensorNumber);
@@ -171,6 +173,8 @@ void buildDerivedConfig() {
     "%s/sensor/%s_battery_v/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BAT_PCT, sizeof(DISC_BAT_PCT),
     "%s/sensor/%s_battery_pct/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_TS, sizeof(DISC_TS),
+    "%s/sensor/%s_ts/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -676,6 +680,15 @@ void publishDiscovery() {
     "\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\",%s}",
     SENSOR_ID, STATE_TOPIC, device);
   mqtt.publish(DISC_BAT_PCT, payload, true);
+  mqtt.loop(); delay(50);
+
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Last Seen\",\"unique_id\":\"%s_ts\","
+    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.ts }}\","
+    "\"device_class\":\"timestamp\","
+    "\"icon\":\"mdi:clock-outline\",%s}",
+    SENSOR_ID, STATE_TOPIC, device);
+  mqtt.publish(DISC_TS, payload, true);
   mqtt.loop(); delay(50);
 
   Serial.println("Discovery — complete");
