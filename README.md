@@ -36,7 +36,7 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 | Moisture sensor | HW-390 capacitive, 3-pin (VCC / GND / AOUT) |
 | Battery | 18650 Li-ion, 2000mAh recommended |
 | Reverse polarity protection | 1N5819 Schottky diode in series with battery positive |
-| Battery voltage divider | 2× 220kΩ resistors (BAT+ → A0 → GND) |
+| Battery voltage divider | 2× 200kΩ resistors (BAT+ → A0 → GND) |
 
 ### Wiring
 
