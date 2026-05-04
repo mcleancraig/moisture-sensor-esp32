@@ -68,7 +68,7 @@ All other libraries (`WiFi`, `WebServer`, `DNSServer`, `Preferences`, `ArduinoOT
 
 1. Open `moisture-sensor-esp32.ino` in Arduino IDE
 2. Select board: **Tools → Board → XIAO_ESP32C6**
-3. Connect the sensor via USB-C (battery disconnected)
+3. Connect the sensor via USB-C
 4. Select the USB port under **Tools → Port**
 5. Click **Upload**
 
@@ -228,8 +228,8 @@ Each sensor needs only one change — the sensor number is set during portal con
 | 2 | sensor2 | garden/sensor2/state | 192.168.220.2 |
 | 3 | sensor3 | garden/sensor3/state | 192.168.220.3 |
 
-Each sensor must be calibrated individually as HW-390 units vary slightly from one another.
-
+Sensor getting hot when USB connected
+Check battery polarity. Overheating is caused by reverse polarity on the battery connection, not by USB and battery being connected simultaneously. USB and battery can safely coexist — the onboard charger is designed for this. Verify the 1N5819 diode is fitted with anode toward the battery positive terminal.
 ---
 
 ## Troubleshooting
