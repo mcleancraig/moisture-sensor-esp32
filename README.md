@@ -24,6 +24,10 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 
 ![Wiring diagram](wiring-diagram.svg)
 
+
+The XIAO's onboard charger handles battery charging automatically when USB-C is connected. No external charge module is required.
+
+
 ---
 
 ## Hardware
@@ -38,22 +42,7 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 | Reverse polarity protection | 1N5819 Schottky diode in series with battery positive |
 | Battery voltage divider | 2× 200kΩ resistors (BAT+ → A0 → GND) |
 
-### Wiring
 
-```
-18650 (+) ── 1N5819 (anode→cathode) ──┬── XIAO BAT+ pad
-                                       └── 220kΩ ── A0 ── 220kΩ ── GND
-
-18650 (−) ────────────────────────────── XIAO BAT− pad ── GND
-
-HW-390 VCC  ── XIAO 3V3
-HW-390 GND  ── GND
-HW-390 AOUT ── XIAO A1 (GPIO1)
-```
-
-The XIAO's onboard charger handles battery charging automatically when USB-C is connected. No external charge module is required.
-
-**Important:** Disconnect the battery before connecting USB for flashing. The onboard regulator can be damaged if both are connected simultaneously without a diode on the 5V pin.
 
 ---
 
