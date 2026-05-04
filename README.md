@@ -24,6 +24,10 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 
 ![Wiring diagram](wiring-diagram.svg)
 
+
+The XIAO's onboard charger handles battery charging automatically when USB-C is connected. No external charge module is required.
+
+
 ---
 
 ## Hardware
@@ -35,11 +39,16 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 | MCU | Seeed XIAO ESP32-C6 |
 | Moisture sensor | HW-390 capacitive, 3-pin (VCC / GND / AOUT) |
 | Battery | 18650 Li-ion, 2000mAh recommended |
+<<<<<<< HEAD
 | Reverse polarity protection | None currently - working on a MOSFET solution |
 | Battery voltage divider | 2× 220kΩ resistors (BAT+ → A0 → GND) |
+=======
+| Reverse polarity protection | 1N5819 Schottky diode in series with battery positive |
+| Battery voltage divider | 2× 200kΩ resistors (BAT+ → A0 → GND) |
+>>>>>>> refs/remotes/origin/main
 
-### Wiring
 
+<<<<<<< HEAD
 ```
 18650 (+) ─────────────────────────────┬── XIAO BAT+ pad
                                        └── 220kΩ ── A0 ── 220kΩ ── GND
@@ -54,6 +63,8 @@ HW-390 AOUT ── XIAO A1 (GPIO1)
 The XIAO's onboard charger handles battery charging automatically when USB-C is connected. No external charge module is required.
 
 **Important:** Disconnect the battery before connecting USB for flashing. The onboard regulator can be damaged if both are connected simultaneously without a diode on the 5V pin.
+=======
+>>>>>>> refs/remotes/origin/main
 
 ---
 
@@ -79,7 +90,7 @@ All other libraries (`WiFi`, `WebServer`, `DNSServer`, `Preferences`, `ArduinoOT
 
 1. Open `moisture-sensor-esp32.ino` in Arduino IDE
 2. Select board: **Tools → Board → XIAO_ESP32C6**
-3. Connect the sensor via USB-C (battery disconnected)
+3. Connect the sensor via USB-C
 4. Select the USB port under **Tools → Port**
 5. Click **Upload**
 
@@ -239,8 +250,8 @@ Each sensor needs only one change — the sensor number is set during portal con
 | 2 | sensor2 | garden/sensor2/state | 192.168.220.2 |
 | 3 | sensor3 | garden/sensor3/state | 192.168.220.3 |
 
-Each sensor must be calibrated individually as HW-390 units vary slightly from one another.
-
+Sensor getting hot when USB connected
+Check battery polarity. Overheating is caused by reverse polarity on the battery connection, not by USB and battery being connected simultaneously. USB and battery can safely coexist — the onboard charger is designed for this. Verify the 1N5819 diode is fitted with anode toward the battery positive terminal.
 ---
 
 ## Troubleshooting
@@ -263,7 +274,11 @@ Recalibrate — the `DRY_MV` and `WET_MV` values in the firmware need to match y
 The battery reading falls outside the sanity check range (2.5V–4.3V). Check the voltage divider wiring — two 220kΩ resistors from BAT+ to A0 to GND. Confirm A0 is the pin connected to the midpoint, not A1.
 
 **Sensor getting hot when USB connected**
+<<<<<<< HEAD
 Check battery orientation carefully — no reverse polarity protection is currently fitted.
+=======
+Check battery polarity. Overheating is caused by reverse polarity on the battery connection, not by USB and battery being connected simultaneously. USB and battery can safely coexist — the onboard charger is designed for this. Verify the 1N5819 diode is fitted with anode toward the battery positive terminal.
+>>>>>>> refs/remotes/origin/main
 
 ---
 
