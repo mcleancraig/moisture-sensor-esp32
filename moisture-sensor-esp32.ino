@@ -9,9 +9,11 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
-//  v2.2.0
+//  v2.3.0
 //  - Captive portal config on first boot
 //  - Boot button hold to reconfigure without reflashing
+//  - Reed switch hold to restart (external, no enclosure access needed)
+//  - MQTT retained command: reset / restart (self-clearing)
 //  - OTA firmware updates over WiFi
 //  - Firmware version in MQTT payload
 //  - NTP timestamp in MQTT payload (10s timeout)
@@ -19,13 +21,13 @@
 //  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
 
-#define FIRMWARE_VERSION "2.0.2"
-
+#define FIRMWARE_VERSION "2.3.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
 const int BATTERY_PIN  = 1;   // A1 — voltage divider midpoint
 const int BTN_BOOT     = 9;   // Boot button on XIAO ESP32-C6
+const int REED_PIN     = 3;   // Reed switch — GND when magnet present
 
 // ── Fixed calibration ─────────────────────────────────────
 const int   DRY_MV         = 2800;
@@ -40,15 +42,17 @@ const int SLEEP_MINUTES      = 15;
 const int AP_TIMEOUT_MIN     = 10;
 const int AP_SLEEP_MIN       = 10;
 const int BOOT_HOLD_MS       = 3000;
+const int REED_HOLD_MS       = 3000;
 const int OTA_WAIT_MS        = 5000;
-const int NTP_TIMEOUT_MS     = 10000;  // give up on NTP after 10 seconds
+const int NTP_TIMEOUT_MS     = 10000;
+const int CMD_LISTEN_MS      = 2000;  // MQTT command listen window per wake
 
 // ── AP credentials ────────────────────────────────────────
 const char* AP_PASSWORD      = "moisture";
 
 // ── NTP ───────────────────────────────────────────────────
 const char* NTP_SERVER   = "pool.ntp.org";
-const long  GMT_OFFSET_S = 0;   // UTC — HA handles timezone display
+const long  GMT_OFFSET_S = 0;
 const int   DST_OFFSET_S = 0;
 
 // ── HA discovery prefix ───────────────────────────────────
@@ -83,27 +87,22 @@ void loadConfig() {
   prefs.getString("wifiSSID",   cfg.wifiSSID,    sizeof(cfg.wifiSSID));
   prefs.getString("wifiPass",   cfg.wifiPassword,sizeof(cfg.wifiPassword));
   cfg.staticIP  = prefs.getBool("staticIP", false);
-  // Static IP
   cfg.ip[0]  = prefs.getUChar("ip0",  192);
   cfg.ip[1]  = prefs.getUChar("ip1",  168);
   cfg.ip[2]  = prefs.getUChar("ip2",  220);
   cfg.ip[3]  = prefs.getUChar("ip3",    1);
-  // Gateway
   cfg.gw[0]  = prefs.getUChar("gw0",  192);
   cfg.gw[1]  = prefs.getUChar("gw1",  168);
   cfg.gw[2]  = prefs.getUChar("gw2",    1);
   cfg.gw[3]  = prefs.getUChar("gw3",    1);
-  // Subnet mask
   cfg.sn[0]  = prefs.getUChar("sn0",  255);
   cfg.sn[1]  = prefs.getUChar("sn1",  255);
   cfg.sn[2]  = prefs.getUChar("sn2",    0);
   cfg.sn[3]  = prefs.getUChar("sn3",    0);
-  // DNS
   cfg.dns[0] = prefs.getUChar("dns0", 192);
   cfg.dns[1] = prefs.getUChar("dns1", 168);
   cfg.dns[2] = prefs.getUChar("dns2",   1);
   cfg.dns[3] = prefs.getUChar("dns3",   1);
-
   prefs.getString("mqttBroker", cfg.mqttBroker,  sizeof(cfg.mqttBroker));
   cfg.mqttPort  = prefs.getInt("mqttPort", 1883);
   prefs.getString("mqttUser",   cfg.mqttUser,    sizeof(cfg.mqttUser));
@@ -157,16 +156,17 @@ void saveConfig(int sensorNum,
 char SENSOR_ID[16];
 char SENSOR_NAME[32];
 char STATE_TOPIC[64];
+char CMD_TOPIC[64];
 char DISC_MOISTURE[128];
 char DISC_BAT_V[128];
 char DISC_BAT_PCT[128];
 char DISC_TS[128];
 
-
 void buildDerivedConfig() {
   snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.sensorNumber);
   snprintf(SENSOR_NAME, sizeof(SENSOR_NAME), "Garden Moisture Sensor %d", cfg.sensorNumber);
   snprintf(STATE_TOPIC, sizeof(STATE_TOPIC), "garden/%s/state",           SENSOR_ID);
+  snprintf(CMD_TOPIC,   sizeof(CMD_TOPIC),   "garden/%s/cmd",             SENSOR_ID);
   snprintf(DISC_MOISTURE, sizeof(DISC_MOISTURE),
     "%s/sensor/%s_moisture/config",    HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BAT_V, sizeof(DISC_BAT_V),
@@ -174,7 +174,7 @@ void buildDerivedConfig() {
   snprintf(DISC_BAT_PCT, sizeof(DISC_BAT_PCT),
     "%s/sensor/%s_battery_pct/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_TS, sizeof(DISC_TS),
-    "%s/sensor/%s_ts/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+    "%s/sensor/%s_ts/config",          HA_DISCOVERY_PREFIX, SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -357,22 +357,18 @@ void handleSave() {
   int  port      = server.arg("mqttPort").toInt();
   if (port == 0) port = 1883;
 
-  // Static IP
-  uint8_t ip0 = staticIp ? server.arg("ip1").toInt() : 192;
-  uint8_t ip1 = staticIp ? server.arg("ip2").toInt() : 168;
-  uint8_t ip2 = staticIp ? server.arg("ip3").toInt() : 220;
-  uint8_t ip3 = staticIp ? server.arg("ip4").toInt() : (uint8_t)sensorNum;
-  // Gateway
-  uint8_t gw0 = staticIp ? server.arg("gw1").toInt() : 192;
-  uint8_t gw1 = staticIp ? server.arg("gw2").toInt() : 168;
-  uint8_t gw2 = staticIp ? server.arg("gw3").toInt() : 1;
-  uint8_t gw3 = staticIp ? server.arg("gw4").toInt() : 1;
-  // Subnet
-  uint8_t sn0 = staticIp ? server.arg("sn1").toInt() : 255;
-  uint8_t sn1 = staticIp ? server.arg("sn2").toInt() : 255;
-  uint8_t sn2 = staticIp ? server.arg("sn3").toInt() : 0;
-  uint8_t sn3 = staticIp ? server.arg("sn4").toInt() : 0;
-  // DNS
+  uint8_t ip0  = staticIp ? server.arg("ip1").toInt()  : 192;
+  uint8_t ip1  = staticIp ? server.arg("ip2").toInt()  : 168;
+  uint8_t ip2  = staticIp ? server.arg("ip3").toInt()  : 220;
+  uint8_t ip3  = staticIp ? server.arg("ip4").toInt()  : (uint8_t)sensorNum;
+  uint8_t gw0  = staticIp ? server.arg("gw1").toInt()  : 192;
+  uint8_t gw1  = staticIp ? server.arg("gw2").toInt()  : 168;
+  uint8_t gw2  = staticIp ? server.arg("gw3").toInt()  : 1;
+  uint8_t gw3  = staticIp ? server.arg("gw4").toInt()  : 1;
+  uint8_t sn0  = staticIp ? server.arg("sn1").toInt()  : 255;
+  uint8_t sn1  = staticIp ? server.arg("sn2").toInt()  : 255;
+  uint8_t sn2  = staticIp ? server.arg("sn3").toInt()  : 0;
+  uint8_t sn3  = staticIp ? server.arg("sn4").toInt()  : 0;
   uint8_t dns0 = staticIp ? server.arg("dns1").toInt() : 192;
   uint8_t dns1 = staticIp ? server.arg("dns2").toInt() : 168;
   uint8_t dns2 = staticIp ? server.arg("dns3").toInt() : 1;
@@ -508,6 +504,30 @@ void getTimestamp(char* buf, size_t len) {
 }
 
 // ═══════════════════════════════════════════════════════════
+//  REED SWITCH
+// ═══════════════════════════════════════════════════════════
+
+void checkReedSwitch() {
+  pinMode(REED_PIN, INPUT_PULLUP);
+  delay(50);
+
+  if (digitalRead(REED_PIN) == LOW) {
+    Serial.println("Reed      — magnet detected, waiting to confirm...");
+    unsigned long holdStart = millis();
+    while (digitalRead(REED_PIN) == LOW) {
+      if (millis() - holdStart >= REED_HOLD_MS) {
+        Serial.println("Reed      — confirmed, restarting");
+        Serial.flush();
+        delay(200);
+        ESP.restart();
+      }
+      delay(50);
+    }
+    Serial.println("Reed      — magnet removed early, ignoring");
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
 //  SENSORS
 // ═══════════════════════════════════════════════════════════
 
@@ -606,12 +626,35 @@ bool connectWifi() {
   return false;
 }
 
+// ═══════════════════════════════════════════════════════════
+//  MQTT + COMMAND HANDLING
+// ═══════════════════════════════════════════════════════════
+
 WiFiClient   wifiClient;
 PubSubClient mqtt(wifiClient);
+
+bool cmdReceived    = false;
+char cmdPayload[32] = "";
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Empty payload means the retained message was cleared — ignore
+  if (length == 0) return;
+  if (length >= sizeof(cmdPayload)) return;
+
+  memcpy(cmdPayload, payload, length);
+  cmdPayload[length] = '\0';
+  cmdReceived = true;
+  Serial.printf("Command   — received: %s\n", cmdPayload);
+
+  // Immediately clear the retained message so it only fires once
+  mqtt.publish(CMD_TOPIC, "", true);
+  mqtt.loop();
+}
 
 void connectMqtt() {
   mqtt.setServer(cfg.mqttBroker, cfg.mqttPort);
   mqtt.setBufferSize(512);
+  mqtt.setCallback(mqttCallback);
   String clientId = String("garden-") + SENSOR_ID;
   Serial.printf("MQTT      — connecting to %s as %s\n",
     cfg.mqttBroker, clientId.c_str());
@@ -624,6 +667,8 @@ void connectMqtt() {
 
     if (ok) {
       Serial.println("MQTT      — connected");
+      mqtt.subscribe(CMD_TOPIC);
+      Serial.printf("MQTT      — subscribed to %s\n", CMD_TOPIC);
     } else {
       Serial.printf("MQTT      — failed (rc=%d), retrying\n", mqtt.state());
       delay(500);
@@ -634,6 +679,28 @@ void connectMqtt() {
   if (!mqtt.connected()) {
     Serial.println("MQTT      — could not connect, going to sleep");
     goToSleep();
+  }
+}
+
+void processMqttCommand() {
+  if (!cmdReceived) return;
+  cmdReceived = false;
+
+  if (strcmp(cmdPayload, "reset") == 0) {
+    Serial.println("Command   — resetting config and restarting into portal");
+    Serial.flush();
+    delay(200);
+    clearConfig();
+    ESP.restart();
+
+  } else if (strcmp(cmdPayload, "restart") == 0) {
+    Serial.println("Command   — restarting");
+    Serial.flush();
+    delay(200);
+    ESP.restart();
+
+  } else {
+    Serial.printf("Command   — unknown: %s\n", cmdPayload);
   }
 }
 
@@ -705,6 +772,9 @@ void setup() {
   Serial.println(  "║   Garden Sensor Boot     ║");
   Serial.printf(   "║   Firmware v%-12s ║\n", FIRMWARE_VERSION);
   Serial.println(  "╚══════════════════════════╝");
+
+  // ── Reed switch check ─────────────────────────────────────
+  checkReedSwitch();
 
   // ── Boot button check — hold for 3s to force reconfiguration ──
   pinMode(BTN_BOOT, INPUT_PULLUP);
@@ -797,8 +867,19 @@ void setup() {
     }
     bool ok = mqtt.publish(STATE_TOPIC, payload, true);
     Serial.printf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
-    mqtt.loop();
-    delay(100);
+
+    // ── Listen for incoming commands ──────────────────────
+    // Retained commands published any time are delivered here
+    Serial.println("MQTT      — listening for commands...");
+    unsigned long listenDeadline = millis() + CMD_LISTEN_MS;
+    while (millis() < listenDeadline) {
+      mqtt.loop();
+      delay(10);
+    }
+
+    // Act on any command — restart/reset will not return here
+    // If no command, fall through to goToSleep()
+    processMqttCommand();
   }
 
   goToSleep();
