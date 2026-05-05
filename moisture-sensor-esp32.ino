@@ -1001,6 +1001,25 @@ void setup() {
 
   // ── Flush buffered boot messages to syslog ────────────────
   syslogUdp.begin(0);   // bind to any local port before first beginPacket()
+
+  // DEBUG — remove before release
+  {
+    IPAddress resolved;
+    int ok = WiFi.hostByName(cfg.syslogHost, resolved);
+    Serial.printf("DEBUG syslog — host: \"%s\"  resolved: %s  (%s)\n",
+      cfg.syslogHost,
+      ok ? resolved.toString().c_str() : "FAILED",
+      ok ? "ok" : "DNS lookup failed");
+    if (ok) {
+      syslogUdp.beginPacket(resolved, cfg.syslogPort);
+      syslogUdp.print("<134>sensor: DEBUG syslog test packet");
+      int sent = syslogUdp.endPacket();
+      Serial.printf("DEBUG syslog — test packet to %s:%d  result: %d\n",
+        resolved.toString().c_str(), cfg.syslogPort, sent);
+    }
+  }
+  // END DEBUG
+
   syslogFlush();
 
   // ── NTP sync (10s timeout) ───────────────────────────────
