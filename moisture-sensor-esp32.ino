@@ -137,7 +137,6 @@ void loadConfig() {
   prefs.getString("mqttPass",   cfg.mqttPassword,sizeof(cfg.mqttPassword));
 
   prefs.getString("syslogHost", cfg.syslogHost, sizeof(cfg.syslogHost));
-  if (strlen(cfg.syslogHost) == 0) strlcpy(cfg.syslogHost, "logs", sizeof(cfg.syslogHost));
   cfg.syslogPort = prefs.getInt("syslogPort", 514);
 
   prefs.end();
@@ -408,9 +407,10 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 
   <div class="section">
     <label>Syslog server <span class="optional">(optional)</span>
-      <input type="text" name="syslogHost" placeholder="logs or 192.168.1.x" value="logs">
+      <input type="text" name="syslogHost" id="syslogHost"
+        placeholder="192.168.1.10 or logs.local">
     </label>
-    <p class="hint">UDP syslog (port 514) — leave blank to disable</p>
+    <p class="hint">Must be an IP address or FQDN — short hostnames are not resolved. Leave blank to disable.</p>
     <label>Syslog port
       <input type="number" name="syslogPort" value="514">
     </label>
@@ -429,6 +429,13 @@ function toggleNet(cb) {
     cb.checked ? 'block' : 'none';
   if (cb.checked) syncNet();
 }
+document.querySelector('form').addEventListener('submit', function(e) {
+  var h = document.getElementById('syslogHost').value.trim();
+  if (h.length > 0 && h.indexOf('.') === -1) {
+    e.preventDefault();
+    alert('Syslog server must be an IP address or FQDN (must contain a dot), or leave blank to disable.');
+  }
+});
 </script>
 </body>
 </html>
@@ -485,9 +492,13 @@ void handleRoot() {
 void handleSave() {
   int sensorNum = server.arg("sensorNum").toInt();
 
+  String syslogHost = server.arg("syslogHost");
+  bool syslogHostBad = syslogHost.length() > 0 && syslogHost.indexOf('.') == -1;
+
   if (sensorNum < 1 || sensorNum > 254 ||
       server.arg("ssid").length() == 0 ||
-      server.arg("mqttBroker").length() == 0) {
+      server.arg("mqttBroker").length() == 0 ||
+      syslogHostBad) {
     server.send_P(400, "text/html", ERROR_HTML);
     return;
   }
@@ -659,12 +670,11 @@ void checkForUpdate() {
 
 bool syncNTP() {
   configTime(GMT_OFFSET_S, DST_OFFSET_S, NTP_SERVER);
-  Serial.print("NTP       — syncing");
+  logf("NTP       — syncing\n");
   struct tm t;
   unsigned long start = millis();
   while (!getLocalTime(&t)) {
     if (millis() - start >= NTP_TIMEOUT_MS) {
-      Serial.println();
       logf("NTP       — timed out after 10s, timestamp will be omitted\n");
       return false;
     }
@@ -791,7 +801,7 @@ bool connectWifi() {
     }
   }
 
-  Serial.printf("WiFi      — connecting to %s", cfg.wifiSSID);
+  logf("WiFi      — connecting to %s\n", cfg.wifiSSID);
   WiFi.begin(cfg.wifiSSID,
     strlen(cfg.wifiPassword) > 0 ? cfg.wifiPassword : nullptr);
 
@@ -801,14 +811,13 @@ bool connectWifi() {
     Serial.print(".");
     attempts++;
   }
+  Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println();
     logf("WiFi      — connected, IP: %s\n", WiFi.localIP().toString().c_str());
     return true;
   }
 
-  Serial.println();
   logf("WiFi      — failed\n");
   return false;
 }
