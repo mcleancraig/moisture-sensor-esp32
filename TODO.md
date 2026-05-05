@@ -10,7 +10,7 @@ Items identified during v2 development for future releases.
 
 ## Maintainability
 
-- [x] **FOTA (v2.3.0)** — sensors automatically check GitHub Releases on each wake and self-update. Attach `version.txt` and `firmware.bin` to each release. IDE-based OTA removed.
+- [x] **FOTA (v2.1.0)** — sensors automatically check GitHub Releases on each wake and self-update. Attach `version.txt` and `firmware.bin` to each release. IDE-based OTA removed.
 
 - [ ] **PCB design** — replace breadboard/perfboard wiring with a custom 2-layer PCB. Castellated footprint for the XIAO ESP32-C6, HW-390 JST connector, 2x 200k voltage divider resistors, 100nF bypass cap, BAT+/BAT- pads. Fabricate via JLCPCB. Reduces assembly time per unit from ~30 min to ~5 min.
 

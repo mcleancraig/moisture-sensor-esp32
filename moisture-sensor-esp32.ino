@@ -9,7 +9,7 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
-//  v2.3.0
+//  v2.1.0
 //  - Captive portal config on first boot
 //  - Boot button hold to reconfigure without reflashing
 //  - Reed switch hold to restart (external, no enclosure access needed)
@@ -22,7 +22,7 @@
 //  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
 
-#define FIRMWARE_VERSION "2.3.0"
+#define FIRMWARE_VERSION "2.1.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6

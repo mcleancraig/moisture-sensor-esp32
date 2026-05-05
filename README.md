@@ -205,7 +205,7 @@ The device card also shows the firmware version (`sw_version`) on the device inf
   "battery_v": 3.87,
   "battery_pct": 62,
   "battery_raw_mv": 1935,
-  "fw": "2.3.0",
+  "fw": "2.1.0",
   "ts": "2026-05-04T14:32:07Z"
 }
 ```
@@ -220,7 +220,7 @@ On each wake the sensor checks GitHub Releases for a newer firmware version and 
 
 1. Bump `FIRMWARE_VERSION` in the sketch
 2. In Arduino IDE go to **Sketch → Export Compiled Binary** — find the `.bin` file in your sketch folder
-3. Create a plain text file `version.txt` containing just the new version number (e.g. `2.3.0`) with no trailing whitespace
+3. Create a plain text file `version.txt` containing just the new version number (e.g. `2.1.0`) with no trailing whitespace
 4. Create a new GitHub release tagged `vX.X.X`, attach both `firmware.bin` and `version.txt` as release assets
 5. Every sensor will pick up the update automatically on its next wake cycle
 
@@ -229,8 +229,8 @@ The `fw` field in the MQTT payload confirms the running firmware version. If an 
 **Tagging and releasing from the command line:**
 
 ```bash
-git tag -a v2.3.0 -m "v2.3.0 release notes here"
-git push origin v2.3.0
+git tag -a v2.1.0 -m "v2.1.0 release notes here"
+git push origin v2.1.0
 ```
 
 Then on GitHub go to **Releases → Draft a new release**, select the tag, and attach `firmware.bin` and `version.txt`.
