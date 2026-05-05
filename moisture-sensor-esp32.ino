@@ -224,10 +224,19 @@ void syslogSend(const char* msg) {
   while (len > 0 && (clean[len-1] == '\n' || clean[len-1] == '\r')) clean[--len] = '\0';
   if (len == 0) return;
 
+  // RFC 3164 timestamp: "Jan  1 12:34:56" — falls back to epoch if NTP not yet synced
+  char timestamp[16];
+  struct tm t;
+  if (getLocalTime(&t)) {
+    strftime(timestamp, sizeof(timestamp), "%b %e %T", &t);
+  } else {
+    strlcpy(timestamp, "Jan  1 00:00:00", sizeof(timestamp));
+  }
+
   const char* tag = (strlen(SENSOR_ID) > 0) ? SENSOR_ID : "sensor";
-  char packet[160];
+  char packet[180];
   // facility=local0(16), severity=info(6) → priority 134
-  snprintf(packet, sizeof(packet), "<134>%s: %s", tag, clean);
+  snprintf(packet, sizeof(packet), "<134>%s %s: %s", timestamp, tag, clean);
 
   syslogUdp.beginPacket(cfg.syslogHost, cfg.syslogPort);
   syslogUdp.print(packet);
@@ -999,31 +1008,12 @@ void setup() {
     return;
   }
 
-  // ── Flush buffered boot messages to syslog ────────────────
-  syslogUdp.begin(0);   // bind to any local port before first beginPacket()
-
-  // DEBUG — remove before release
-  {
-    IPAddress resolved;
-    int ok = WiFi.hostByName(cfg.syslogHost, resolved);
-    Serial.printf("DEBUG syslog — host: \"%s\"  resolved: %s  (%s)\n",
-      cfg.syslogHost,
-      ok ? resolved.toString().c_str() : "FAILED",
-      ok ? "ok" : "DNS lookup failed");
-    if (ok) {
-      syslogUdp.beginPacket(resolved, cfg.syslogPort);
-      syslogUdp.print("<134>sensor: DEBUG syslog test packet");
-      int sent = syslogUdp.endPacket();
-      Serial.printf("DEBUG syslog — test packet to %s:%d  result: %d\n",
-        resolved.toString().c_str(), cfg.syslogPort, sent);
-    }
-  }
-  // END DEBUG
-
-  syslogFlush();
-
   // ── NTP sync (10s timeout) ───────────────────────────────
   syncNTP();
+
+  // ── Flush buffered boot messages to syslog (after NTP for real timestamps) ──
+  syslogUdp.begin(0);   // bind to any local port before first beginPacket()
+  syslogFlush();
 
   // ── FOTA check — skipped on dev/test builds ───────────────
   checkForUpdate();
