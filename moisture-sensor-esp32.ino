@@ -16,7 +16,7 @@
 //  - Server-side validation in handleSave()
 //  - handleNotFound() uses softAPIP() instead of hardcoded 192.168.4.1
 //  - readMoisture() returns MoistureReading struct (was raw mV only)
-//  - mqtt.disconnect() before deep sleep
+//  - mqtt.disconnect() before deep sleep (at normal end of cycle)
 //  - MQTT buffer size increased to 768
 //
 //  v2.1.0
@@ -608,7 +608,6 @@ void checkReedSwitch() {
 // ═══════════════════════════════════════════════════════════
 
 void goToSleep() {
-  if (mqtt.connected()) mqtt.disconnect();
   Serial.printf("Sleep     — going to sleep for %d minutes\n", SLEEP_MINUTES);
   Serial.flush();
   esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60 * 1000000ULL);
@@ -948,6 +947,7 @@ void setup() {
     processMqttCommand();
   }
 
+  mqtt.disconnect();
   goToSleep();
 }
 
