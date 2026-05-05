@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <WiFiUDP.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
@@ -18,6 +19,9 @@
 //  - readMoisture() returns MoistureReading struct (was raw mV only)
 //  - mqtt.disconnect() before deep sleep (at normal end of cycle)
 //  - MQTT buffer size increased to 768
+//  - FOTA blocked on development/test builds (version string contains '-')
+//  - Syslog over UDP: buffers boot messages, flushes after WiFi connect
+//  - Syslog server and port configurable in portal (default: logs:514)
 //
 //  v2.1.0
 //  - Captive portal config on first boot
@@ -31,7 +35,7 @@
 //  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
 
-#define FIRMWARE_VERSION "2.2.0"
+#define FIRMWARE_VERSION "2.2.0-dev"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -90,6 +94,8 @@ struct Config {
   int     mqttPort;
   char    mqttUser[32];
   char    mqttPassword[64];
+  char    syslogHost[64];
+  int     syslogPort;
 } cfg;
 
 struct MoistureReading {
@@ -129,6 +135,11 @@ void loadConfig() {
   cfg.mqttPort  = prefs.getInt("mqttPort", 1883);
   prefs.getString("mqttUser",   cfg.mqttUser,    sizeof(cfg.mqttUser));
   prefs.getString("mqttPass",   cfg.mqttPassword,sizeof(cfg.mqttPassword));
+
+  prefs.getString("syslogHost", cfg.syslogHost, sizeof(cfg.syslogHost));
+  if (strlen(cfg.syslogHost) == 0) strlcpy(cfg.syslogHost, "logs", sizeof(cfg.syslogHost));
+  cfg.syslogPort = prefs.getInt("syslogPort", 514);
+
   prefs.end();
 
   configLoaded = (cfg.sensorNumber > 0 && strlen(cfg.wifiSSID) > 0 && strlen(cfg.mqttBroker) > 0);
@@ -138,7 +149,7 @@ void clearConfig() {
   prefs.begin("sensor", false);
   prefs.clear();
   prefs.end();
-  Serial.println("Config    — NVS cleared");
+  logf("Config    — NVS cleared\n");
 }
 
 void saveConfig(const Config& c) {
@@ -155,8 +166,10 @@ void saveConfig(const Config& c) {
   prefs.putInt("mqttPort",      c.mqttPort);
   prefs.putString("mqttUser",   c.mqttUser);
   prefs.putString("mqttPass",   c.mqttPassword);
+  prefs.putString("syslogHost", c.syslogHost);
+  prefs.putInt("syslogPort",    c.syslogPort);
   prefs.end();
-  Serial.println("Config    — saved to NVS");
+  logf("Config    — saved to NVS\n");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -185,6 +198,75 @@ void buildDerivedConfig() {
     "%s/sensor/%s_battery_pct/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_TS, sizeof(DISC_TS),
     "%s/sensor/%s_ts/config",          HA_DISCOVERY_PREFIX, SENSOR_ID);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  SYSLOG
+//  Boot messages are buffered until WiFi connects, then flushed.
+//  All subsequent messages are sent immediately.
+//  logf() is used in place of Serial.printf/println throughout.
+// ═══════════════════════════════════════════════════════════
+
+#define SYSLOG_LINES 24
+#define SYSLOG_LINE  120
+
+static char syslogBuf[SYSLOG_LINES][SYSLOG_LINE];
+static int  syslogHead  = 0;
+static int  syslogTotal = 0;
+static bool syslogReady = false;
+
+WiFiUDP syslogUdp;
+
+void syslogSend(const char* msg) {
+  char clean[SYSLOG_LINE];
+  strlcpy(clean, msg, sizeof(clean));
+  int len = strlen(clean);
+  while (len > 0 && (clean[len-1] == '\n' || clean[len-1] == '\r')) clean[--len] = '\0';
+  if (len == 0) return;
+
+  const char* tag = (strlen(SENSOR_ID) > 0) ? SENSOR_ID : "sensor";
+  char packet[160];
+  // facility=local0(16), severity=info(6) → priority 134
+  snprintf(packet, sizeof(packet), "<134>%s: %s", tag, clean);
+
+  syslogUdp.beginPacket(cfg.syslogHost, cfg.syslogPort);
+  syslogUdp.print(packet);
+  syslogUdp.endPacket();
+}
+
+void syslogFlush() {
+  if (strlen(cfg.syslogHost) == 0) { syslogReady = true; return; }
+  int count = min(syslogTotal, SYSLOG_LINES);
+  int start = (syslogTotal >= SYSLOG_LINES) ? syslogHead : 0;
+  for (int i = 0; i < count; i++) {
+    syslogSend(syslogBuf[(start + i) % SYSLOG_LINES]);
+    delay(2);
+  }
+  syslogHead  = 0;
+  syslogTotal = 0;
+  syslogReady = true;
+}
+
+void logf(const char* fmt, ...) {
+  char line[512];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(line, sizeof(line), fmt, args);
+  va_end(args);
+  Serial.print(line);
+
+  if (strlen(cfg.syslogHost) == 0) return;
+
+  char sysline[SYSLOG_LINE];
+  strlcpy(sysline, line, sizeof(sysline));
+
+  if (syslogReady) {
+    syslogSend(sysline);
+  } else {
+    strlcpy(syslogBuf[syslogHead], sysline, SYSLOG_LINE);
+    syslogHead = (syslogHead + 1) % SYSLOG_LINES;
+    syslogTotal++;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -315,6 +397,16 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
     </label>
   </div>
 
+  <div class="section">
+    <label>Syslog server <span class="optional">(optional)</span>
+      <input type="text" name="syslogHost" placeholder="logs or 192.168.1.x" value="logs">
+    </label>
+    <p class="hint">UDP syslog (port 514) — leave blank to disable</p>
+    <label>Syslog port
+      <input type="number" name="syslogPort" value="514">
+    </label>
+  </div>
+
   <button type="submit">Save &amp; Restart</button>
 </form>
 
@@ -419,6 +511,10 @@ void handleSave() {
   strlcpy(c.mqttUser,    server.arg("mqttUser").c_str(),   sizeof(c.mqttUser));
   strlcpy(c.mqttPassword,server.arg("mqttPass").c_str(),   sizeof(c.mqttPassword));
 
+  strlcpy(c.syslogHost, server.arg("syslogHost").c_str(), sizeof(c.syslogHost));
+  c.syslogPort = server.arg("syslogPort").toInt();
+  if (c.syslogPort == 0) c.syslogPort = 514;
+
   saveConfig(c);
 
   server.send_P(200, "text/html", SAVED_HTML);
@@ -443,15 +539,15 @@ void startConfigPortal() {
   snprintf(apName, sizeof(apName), "MOISTURE_%02X%02X%02X%02X%02X%02X",
     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-  Serial.printf("Portal    — starting AP: %s\n", apName);
-  Serial.printf("Portal    — password: %s\n", AP_PASSWORD);
+  logf("Portal    — starting AP: %s\n", apName);
+  logf("Portal    — password: %s\n", AP_PASSWORD);
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(apName, AP_PASSWORD);
 
   IPAddress apIP = WiFi.softAPIP();
-  Serial.printf("Portal    — IP: %s\n", apIP.toString().c_str());
-  Serial.printf("Portal    — will close in %d minutes\n", AP_TIMEOUT_MIN);
+  logf("Portal    — IP: %s\n", apIP.toString().c_str());
+  logf("Portal    — will close in %d minutes\n", AP_TIMEOUT_MIN);
 
   dnsServer.start(53, "*", apIP);
 
@@ -471,7 +567,7 @@ void startConfigPortal() {
   server.stop();
   dnsServer.stop();
   WiFi.softAPdisconnect(true);
-  Serial.printf("Portal    — timed out, sleeping %d minutes\n", AP_SLEEP_MIN);
+  logf("Portal    — timed out, sleeping %d minutes\n", AP_SLEEP_MIN);
   Serial.flush();
   esp_sleep_enable_timer_wakeup((uint64_t)AP_SLEEP_MIN * 60 * 1000000ULL);
   esp_deep_sleep_start();
@@ -483,19 +579,23 @@ void startConfigPortal() {
 // ═══════════════════════════════════════════════════════════
 
 void checkForUpdate() {
-  Serial.println("FOTA      — checking for update...");
+  if (strchr(FIRMWARE_VERSION, '-') != NULL) {
+    logf("FOTA      — skipped: development build (%s)\n", FIRMWARE_VERSION);
+    return;
+  }
+
+  logf("FOTA      — checking for update...\n");
 
   WiFiClientSecure client;
   client.setInsecure();   // skip cert validation — acceptable for own repo
 
-  // Fetch version.txt from latest release
   HTTPClient http;
   http.begin(client, FOTA_VERSION_URL);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   int code = http.GET();
 
   if (code != 200) {
-    Serial.printf("FOTA      — version check failed (HTTP %d)\n", code);
+    logf("FOTA      — version check failed (HTTP %d)\n", code);
     http.end();
     return;
   }
@@ -504,40 +604,39 @@ void checkForUpdate() {
   remoteVersion.trim();
   http.end();
 
-  Serial.printf("FOTA      — local: %s  remote: %s\n",
+  logf("FOTA      — local: %s  remote: %s\n",
     FIRMWARE_VERSION, remoteVersion.c_str());
 
   if (remoteVersion == FIRMWARE_VERSION) {
-    Serial.println("FOTA      — firmware is current, no update needed");
+    logf("FOTA      — firmware is current, no update needed\n");
     return;
   }
 
-  Serial.printf("FOTA      — update available: %s → %s, downloading...\n",
+  logf("FOTA      — update available: %s -> %s, downloading...\n",
     FIRMWARE_VERSION, remoteVersion.c_str());
 
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   httpUpdate.onStart([]() {
-    Serial.println("FOTA      — flashing...");
+    logf("FOTA      — flashing...\n");
   });
   httpUpdate.onEnd([]() {
-    Serial.println("FOTA      — flash complete");
+    logf("FOTA      — flash complete\n");
   });
   httpUpdate.onError([](int e) {
-    Serial.printf("FOTA      — error: %d\n", e);
+    logf("FOTA      — error: %d\n", e);
   });
   httpUpdate.onProgress([](int cur, int tot) {
-    Serial.printf("FOTA      — %d%%\r", (cur * 100) / tot);
+    Serial.printf("FOTA      — %d%%\r", (cur * 100) / tot);  // serial only, too noisy for syslog
   });
 
   t_httpUpdate_return result = httpUpdate.update(client, FOTA_BIN_URL);
 
   switch (result) {
     case HTTP_UPDATE_FAILED:
-      Serial.printf("FOTA      — failed: %s\n",
-        httpUpdate.getLastErrorString().c_str());
+      logf("FOTA      — failed: %s\n", httpUpdate.getLastErrorString().c_str());
       break;
     case HTTP_UPDATE_NO_UPDATES:
-      Serial.println("FOTA      — no update");
+      logf("FOTA      — no update\n");
       break;
     case HTTP_UPDATE_OK:
       // HTTPUpdate restarts automatically — this line is never reached
@@ -556,13 +655,15 @@ bool syncNTP() {
   unsigned long start = millis();
   while (!getLocalTime(&t)) {
     if (millis() - start >= NTP_TIMEOUT_MS) {
-      Serial.println("\nNTP       — timed out after 10s, timestamp will be omitted");
+      Serial.println();
+      logf("NTP       — timed out after 10s, timestamp will be omitted\n");
       return false;
     }
     delay(500);
     Serial.print(".");
   }
-  Serial.printf("\nNTP       — synced: %04d-%02d-%02dT%02d:%02d:%02dZ\n",
+  Serial.println();
+  logf("NTP       — synced: %04d-%02d-%02dT%02d:%02d:%02dZ\n",
     t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
     t.tm_hour, t.tm_min, t.tm_sec);
   return true;
@@ -588,18 +689,18 @@ void checkReedSwitch() {
   delay(50);
 
   if (digitalRead(REED_PIN) == LOW) {
-    Serial.println("Reed      — magnet detected, waiting to confirm...");
+    logf("Reed      — magnet detected, waiting to confirm...\n");
     unsigned long holdStart = millis();
     while (digitalRead(REED_PIN) == LOW) {
       if (millis() - holdStart >= REED_HOLD_MS) {
-        Serial.println("Reed      — confirmed, restarting");
+        logf("Reed      — confirmed, restarting\n");
         Serial.flush();
         delay(200);
         ESP.restart();
       }
       delay(50);
     }
-    Serial.println("Reed      — magnet removed early, ignoring");
+    logf("Reed      — magnet removed early, ignoring\n");
   }
 }
 
@@ -608,7 +709,7 @@ void checkReedSwitch() {
 // ═══════════════════════════════════════════════════════════
 
 void goToSleep() {
-  Serial.printf("Sleep     — going to sleep for %d minutes\n", SLEEP_MINUTES);
+  logf("Sleep     — going to sleep for %d minutes\n", SLEEP_MINUTES);
   Serial.flush();
   esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60 * 1000000ULL);
   esp_deep_sleep_start();
@@ -625,7 +726,7 @@ MoistureReading readMoisture() {
   MoistureReading r;
   r.rawMv   = sum / 10;
   r.percent = constrain(map(r.rawMv, DRY_MV, WET_MV, 0, 100), 0, 100);
-  Serial.printf("Moisture  — raw: %dmV  →  %d%%\n", r.rawMv, r.percent);
+  logf("Moisture  — raw: %dmV  ->  %d%%\n", r.rawMv, r.percent);
   return r;
 }
 
@@ -639,11 +740,11 @@ float readBatteryVoltage(int &rawMv) {
   rawMv = sum / 16;
   float voltage = (rawMv / 1000.0 * DIVIDER_RATIO) + BAT_CAL_OFFSET;
   if (voltage < BAT_MIN || voltage > BAT_MAX) {
-    Serial.printf("Battery   — suspicious reading %.2fV (raw: %dmV), discarding\n",
+    logf("Battery   — suspicious reading %.2fV (raw: %dmV), discarding\n",
       voltage, rawMv);
     return -1.0;
   }
-  Serial.printf("Battery   — raw: %dmV  →  %.2fV\n", rawMv, voltage);
+  logf("Battery   — raw: %dmV  ->  %.2fV\n", rawMv, voltage);
   return voltage;
 }
 
@@ -665,7 +766,7 @@ int batteryPercent(float voltage) {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  WIFI + MQTT
+//  WIFI
 // ═══════════════════════════════════════════════════════════
 
 bool connectWifi() {
@@ -677,7 +778,7 @@ bool connectWifi() {
     IPAddress sn (cfg.sn[0],  cfg.sn[1],  cfg.sn[2],  cfg.sn[3]);
     IPAddress dns(cfg.dns[0], cfg.dns[1], cfg.dns[2], cfg.dns[3]);
     if (!WiFi.config(ip, gw, sn, dns)) {
-      Serial.println("WiFi      — static IP config failed");
+      logf("WiFi      — static IP config failed\n");
     }
   }
 
@@ -693,12 +794,13 @@ bool connectWifi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\nWiFi      — connected, IP: %s\n",
-      WiFi.localIP().toString().c_str());
+    Serial.println();
+    logf("WiFi      — connected, IP: %s\n", WiFi.localIP().toString().c_str());
     return true;
   }
 
-  Serial.println("\nWiFi      — failed");
+  Serial.println();
+  logf("WiFi      — failed\n");
   return false;
 }
 
@@ -719,7 +821,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   memcpy(cmdPayload, payload, length);
   cmdPayload[length] = '\0';
   cmdReceived = true;
-  Serial.printf("Command   — received: %s\n", cmdPayload);
+  logf("Command   — received: %s\n", cmdPayload);
 
   // Clear retained message immediately so it only fires once
   mqtt.publish(CMD_TOPIC, "", true);
@@ -731,7 +833,7 @@ void connectMqtt() {
   mqtt.setBufferSize(768);
   mqtt.setCallback(mqttCallback);
   String clientId = String("garden-") + SENSOR_ID;
-  Serial.printf("MQTT      — connecting to %s as %s\n",
+  logf("MQTT      — connecting to %s as %s\n",
     cfg.mqttBroker, clientId.c_str());
 
   int attempts = 0;
@@ -741,18 +843,18 @@ void connectMqtt() {
       : mqtt.connect(clientId.c_str());
 
     if (ok) {
-      Serial.println("MQTT      — connected");
+      logf("MQTT      — connected\n");
       mqtt.subscribe(CMD_TOPIC);
-      Serial.printf("MQTT      — subscribed to %s\n", CMD_TOPIC);
+      logf("MQTT      — subscribed to %s\n", CMD_TOPIC);
     } else {
-      Serial.printf("MQTT      — failed (rc=%d), retrying\n", mqtt.state());
+      logf("MQTT      — failed (rc=%d), retrying\n", mqtt.state());
       delay(500);
       attempts++;
     }
   }
 
   if (!mqtt.connected()) {
-    Serial.println("MQTT      — could not connect, going to sleep");
+    logf("MQTT      — could not connect, going to sleep\n");
     goToSleep();
   }
 }
@@ -762,20 +864,20 @@ void processMqttCommand() {
   cmdReceived = false;
 
   if (strcmp(cmdPayload, "reset") == 0) {
-    Serial.println("Command   — resetting config and restarting into portal");
+    logf("Command   — resetting config and restarting into portal\n");
     Serial.flush();
     delay(200);
     clearConfig();
     ESP.restart();
 
   } else if (strcmp(cmdPayload, "restart") == 0) {
-    Serial.println("Command   — restarting");
+    logf("Command   — restarting\n");
     Serial.flush();
     delay(200);
     ESP.restart();
 
   } else {
-    Serial.printf("Command   — unknown: %s\n", cmdPayload);
+    logf("Command   — unknown: %s\n", cmdPayload);
   }
 }
 
@@ -833,7 +935,7 @@ void publishDiscovery() {
   mqtt.publish(DISC_TS, payload, true);
   mqtt.loop(); delay(50);
 
-  Serial.println("Discovery — complete");
+  logf("Discovery — complete\n");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -843,10 +945,10 @@ void publishDiscovery() {
 void setup() {
   Serial.begin(115200);
   delay(100);
-  Serial.println("\n╔══════════════════════════╗");
-  Serial.println(  "║   Garden Sensor Boot     ║");
-  Serial.printf(   "║   Firmware v%-12s ║\n", FIRMWARE_VERSION);
-  Serial.println(  "╚══════════════════════════╝");
+  logf("\n╔══════════════════════════╗\n");
+  logf(  "║   Garden Sensor Boot     ║\n");
+  logf(  "║   Firmware v%-12s ║\n", FIRMWARE_VERSION);
+  logf(  "╚══════════════════════════╝\n");
 
   // ── Reed switch check ─────────────────────────────────────
   checkReedSwitch();
@@ -855,11 +957,11 @@ void setup() {
   pinMode(BTN_BOOT, INPUT_PULLUP);
   delay(100);
   if (digitalRead(BTN_BOOT) == LOW) {
-    Serial.println("Config    — boot button held, waiting to confirm...");
+    logf("Config    — boot button held, waiting to confirm...\n");
     unsigned long holdStart = millis();
     while (digitalRead(BTN_BOOT) == LOW) {
       if (millis() - holdStart >= BOOT_HOLD_MS) {
-        Serial.println("Config    — confirmed, clearing config");
+        logf("Config    — confirmed, clearing config\n");
         clearConfig();
         delay(200);
         startConfigPortal();
@@ -867,20 +969,20 @@ void setup() {
       }
       delay(50);
     }
-    Serial.println("Config    — button released early, continuing normal boot");
+    logf("Config    — button released early, continuing normal boot\n");
   }
 
   // ── Load config ───────────────────────────────────────────
   loadConfig();
 
   if (!configLoaded) {
-    Serial.println("Config    — none found, starting portal");
+    logf("Config    — none found, starting portal\n");
     startConfigPortal();
     return;
   }
 
   buildDerivedConfig();
-  Serial.printf("Config    — sensor%d, SSID: %s, broker: %s\n",
+  logf("Config    — sensor%d, SSID: %s, broker: %s\n",
     cfg.sensorNumber, cfg.wifiSSID, cfg.mqttBroker);
 
   // ── Read sensors before WiFi — radio noise affects ADC ───
@@ -892,19 +994,19 @@ void setup() {
 
   // ── Connect WiFi — open portal if it fails ────────────────
   if (!connectWifi()) {
-    Serial.println("Config    — WiFi failed, starting portal");
+    logf("Config    — WiFi failed, starting portal\n");
     startConfigPortal();
     return;
   }
 
+  // ── Flush buffered boot messages to syslog ────────────────
+  syslogFlush();
+
   // ── NTP sync (10s timeout) ───────────────────────────────
   syncNTP();
 
-  // ── FOTA check — auto-update from GitHub Releases ────────
+  // ── FOTA check — skipped on dev/test builds ───────────────
   checkForUpdate();
-  // Note: restarts automatically if update applied, continues if not
-
-  
 
   // ── MQTT ─────────────────────────────────────────────────
   connectMqtt();
@@ -933,10 +1035,10 @@ void setup() {
         FIRMWARE_VERSION, timestamp);
     }
     bool ok = mqtt.publish(STATE_TOPIC, payload, true);
-    Serial.printf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
+    logf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
 
     // ── Listen for incoming commands ──────────────────────
-    Serial.println("MQTT      — listening for commands...");
+    logf("MQTT      — listening for commands...\n");
     unsigned long listenDeadline = millis() + CMD_LISTEN_MS;
     while (millis() < listenDeadline) {
       mqtt.loop();
