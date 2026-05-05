@@ -1000,6 +1000,7 @@ void setup() {
   }
 
   // ── Flush buffered boot messages to syslog ────────────────
+  syslogUdp.begin(0);   // bind to any local port before first beginPacket()
   syslogFlush();
 
   // ── NTP sync (10s timeout) ───────────────────────────────
