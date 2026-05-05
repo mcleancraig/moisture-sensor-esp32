@@ -208,15 +208,21 @@ void buildDerivedConfig() {
 
 #define SYSLOG_LINES 24
 #define SYSLOG_LINE  120
+#define SYSLOG_FUNC  32
 
-static char syslogBuf[SYSLOG_LINES][SYSLOG_LINE];
+struct SyslogEntry {
+  char msg[SYSLOG_LINE];
+  char func[SYSLOG_FUNC];
+};
+
+static SyslogEntry syslogBuf[SYSLOG_LINES];
 static int  syslogHead  = 0;
 static int  syslogTotal = 0;
 static bool syslogReady = false;
 
 WiFiUDP syslogUdp;
 
-void syslogSend(const char* msg) {
+void syslogSend(const char* func, const char* msg) {
   char clean[SYSLOG_LINE];
   strlcpy(clean, msg, sizeof(clean));
   int len = strlen(clean);
@@ -232,10 +238,12 @@ void syslogSend(const char* msg) {
     strlcpy(timestamp, "Jan  1 00:00:00", sizeof(timestamp));
   }
 
-  const char* tag = (strlen(SENSOR_ID) > 0) ? SENSOR_ID : "sensor";
-  char packet[180];
+  const char* hostname = (strlen(SENSOR_ID) > 0) ? SENSOR_ID : "sensor";
+  char packet[220];
+  // RFC 3164: <PRI>TIMESTAMP HOSTNAME APP[FUNC]: MSG
   // facility=local0(16), severity=info(6) → priority 134
-  snprintf(packet, sizeof(packet), "<134>%s %s: %s", timestamp, tag, clean);
+  snprintf(packet, sizeof(packet), "<134>%s %s moisture-sensor-esp32[%s]: %s",
+    timestamp, hostname, func, clean);
 
   syslogUdp.beginPacket(cfg.syslogHost, cfg.syslogPort);
   syslogUdp.print(packet);
@@ -247,7 +255,8 @@ void syslogFlush() {
   int count = min(syslogTotal, SYSLOG_LINES);
   int start = (syslogTotal >= SYSLOG_LINES) ? syslogHead : 0;
   for (int i = 0; i < count; i++) {
-    syslogSend(syslogBuf[(start + i) % SYSLOG_LINES]);
+    int idx = (start + i) % SYSLOG_LINES;
+    syslogSend(syslogBuf[idx].func, syslogBuf[idx].msg);
     delay(2);
   }
   syslogHead  = 0;
@@ -255,7 +264,9 @@ void syslogFlush() {
   syslogReady = true;
 }
 
-void logf(const char* fmt, ...) {
+// logf() is a macro so __func__ resolves to the calling function name.
+// The internal _logf() carries it through to the syslog packet.
+void _logf(const char* func, const char* fmt, ...) {
   char line[512];
   va_list args;
   va_start(args, fmt);
@@ -269,13 +280,16 @@ void logf(const char* fmt, ...) {
   strlcpy(sysline, line, sizeof(sysline));
 
   if (syslogReady) {
-    syslogSend(sysline);
+    syslogSend(func, sysline);
   } else {
-    strlcpy(syslogBuf[syslogHead], sysline, SYSLOG_LINE);
+    strlcpy(syslogBuf[syslogHead].msg,  sysline, SYSLOG_LINE);
+    strlcpy(syslogBuf[syslogHead].func, func,    SYSLOG_FUNC);
     syslogHead = (syslogHead + 1) % SYSLOG_LINES;
     syslogTotal++;
   }
 }
+
+#define logf(fmt, ...) _logf(__func__, fmt, ##__VA_ARGS__)
 
 // ═══════════════════════════════════════════════════════════
 //  CAPTIVE PORTAL HTML
