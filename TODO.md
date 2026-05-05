@@ -10,7 +10,11 @@ Items identified during v2 development for future releases.
 
 ## Maintainability
 
-- [ ] **MQTT-triggered OTA** — use the `garden/sensorN/cmd` topic to set a retined 'ota' message to start OTA. Stay awake for 5 minutes and if nothing just go back to sleep
+### OTA
+
+- [ ] **MQTT-triggered OTA** — use the `garden/sensorN/cmd` topic to set a retined 'ota' message to start OTA.
+= [ ] **Internet OTA** - have the esp reach out for firmware update rather than use IDE, if possible
+
 
 - [ ] **PCB design** — replace breadboard/perfboard wiring with a custom 2-layer PCB. Castellated footprint for the XIAO ESP32-C6, HW-390 JST connector, 1N5819 diode footprint, 2x 200k voltage divider resistors, 100nF bypass cap, BAT+/BAT- pads. Fabricate via JLCPCB. Reduces assembly time per unit from ~30 min to ~5 min.
 
