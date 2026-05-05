@@ -5,24 +5,26 @@
 #include <PubSubClient.h>
 #include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
+#include <WiFiUdp.h>
 #include <time.h>
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
-//  v2.1.0
+//  v2.2.0
 //  - Captive portal config on first boot
 //  - Boot button hold to reconfigure without reflashing
 //  - Reed switch hold to restart (external, no enclosure access needed)
 //  - MQTT retained command: reset / restart (self-clearing)
 //  - FOTA: automatic firmware update from GitHub Releases
-//  - OTA: IDE-based update over WiFi (fallback for development)
-//  - Firmware version in MQTT payload
+//  - Syslog: all log output mirrored to UDP syslog server
+//  - Pre-WiFi log queue: boot messages flushed to syslog on connect
+//  - Password reveal toggles on all password fields in portal
 //  - NTP timestamp in MQTT payload (10s timeout)
 //  - Gateway, netmask and DNS configurable via portal
 //  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
 
-#define FIRMWARE_VERSION "2.1.0"
+#define FIRMWARE_VERSION "2.2.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -56,11 +58,36 @@ const long  GMT_OFFSET_S = 0;
 const int   DST_OFFSET_S = 0;
 
 // ── FOTA ─────────────────────────────────────────────────
-const char* FOTA_VERSION_URL = "https://github.com/mcleancraig/moisture-sensor-esp32/releases/latest/download/version.txt";
-const char* FOTA_BIN_URL     = "https://github.com/mcleancraig/moisture-sensor-esp32/releases/latest/download/moisture-sensor-esp32.ino.bin";
+const char* FOTA_VERSION_URL =
+  "https://github.com/mcleancraig/moisture-sensor-esp32"
+  "/releases/latest/download/version.txt";
+const char* FOTA_BIN_URL =
+  "https://github.com/mcleancraig/moisture-sensor-esp32"
+  "/releases/latest/download/moisture-sensor-esp32.ino.bin";
 
 // ── HA discovery prefix ───────────────────────────────────
 const char* HA_DISCOVERY_PREFIX = "homeassistant";
+
+// ── Syslog ───────────────────────────────────────────────
+// RFC 3164 facility 1 (user) + severity 6 (info)  = priority 14
+// RFC 3164 facility 1 (user) + severity 3 (error) = priority 11
+#define SYSLOG_PRI_INFO  14
+#define SYSLOG_PRI_ERR   11
+#define SYSLOG_MAX_MSG   128
+#define SYSLOG_QUEUE_LEN 20
+
+WiFiUDP udpSyslog;
+bool    syslogReady = false;   // true once WiFi is up and syslog configured
+
+// Pre-WiFi queue — stores messages until WiFi connects
+struct SyslogEntry {
+  int  pri;
+  char func[32];
+  char msg[SYSLOG_MAX_MSG];
+};
+SyslogEntry syslogQueue[SYSLOG_QUEUE_LEN];
+int syslogQueueHead = 0;
+int syslogQueueLen  = 0;
 
 // ═══════════════════════════════════════════════════════════
 //  RUNTIME CONFIG — loaded from NVS
@@ -81,6 +108,8 @@ struct Config {
   int     mqttPort;
   char    mqttUser[32];
   char    mqttPassword[64];
+  char    syslogServer[64];
+  int     syslogPort;
 } cfg;
 
 bool configLoaded = false;
@@ -107,10 +136,13 @@ void loadConfig() {
   cfg.dns[1] = prefs.getUChar("dns1", 168);
   cfg.dns[2] = prefs.getUChar("dns2",   1);
   cfg.dns[3] = prefs.getUChar("dns3",   1);
-  prefs.getString("mqttBroker", cfg.mqttBroker,  sizeof(cfg.mqttBroker));
+  prefs.getString("mqttBroker",   cfg.mqttBroker,    sizeof(cfg.mqttBroker));
   cfg.mqttPort  = prefs.getInt("mqttPort", 1883);
-  prefs.getString("mqttUser",   cfg.mqttUser,    sizeof(cfg.mqttUser));
-  prefs.getString("mqttPass",   cfg.mqttPassword,sizeof(cfg.mqttPassword));
+  prefs.getString("mqttUser",     cfg.mqttUser,      sizeof(cfg.mqttUser));
+  prefs.getString("mqttPass",     cfg.mqttPassword,  sizeof(cfg.mqttPassword));
+  prefs.getString("syslogServer", cfg.syslogServer,  sizeof(cfg.syslogServer));
+  if (strlen(cfg.syslogServer) == 0) strncpy(cfg.syslogServer, "logs", sizeof(cfg.syslogServer));
+  cfg.syslogPort = prefs.getInt("syslogPort", 514);
   prefs.end();
 
   configLoaded = (cfg.sensorNumber > 0 && strlen(cfg.wifiSSID) > 0);
@@ -131,7 +163,8 @@ void saveConfig(int sensorNum,
                 uint8_t sn0,  uint8_t sn1,  uint8_t sn2,  uint8_t sn3,
                 uint8_t dns0, uint8_t dns1, uint8_t dns2, uint8_t dns3,
                 const char* broker, int port,
-                const char* user, const char* mqttPass) {
+                const char* user, const char* mqttPass,
+                const char* syslogServer, int syslogPort) {
   prefs.begin("sensor", false);
   prefs.putInt("sensorNum",  sensorNum);
   prefs.putString("wifiSSID",  ssid);
@@ -145,12 +178,99 @@ void saveConfig(int sensorNum,
   prefs.putUChar("sn2",  sn2);  prefs.putUChar("sn3",  sn3);
   prefs.putUChar("dns0", dns0); prefs.putUChar("dns1", dns1);
   prefs.putUChar("dns2", dns2); prefs.putUChar("dns3", dns3);
-  prefs.putString("mqttBroker", broker);
-  prefs.putInt("mqttPort",     port);
-  prefs.putString("mqttUser",  user);
-  prefs.putString("mqttPass",  mqttPass);
+  prefs.putString("mqttBroker",   broker);
+  prefs.putInt("mqttPort",        port);
+  prefs.putString("mqttUser",     user);
+  prefs.putString("mqttPass",     mqttPass);
+  prefs.putString("syslogServer", syslogServer);
+  prefs.putInt("syslogPort",      syslogPort);
   prefs.end();
   Serial.println("Config    — saved to NVS");
+}
+
+// ═══════════════════════════════════════════════════════════
+//  LOGGING — serial + syslog with pre-WiFi queue
+// ═══════════════════════════════════════════════════════════
+
+void sendSyslogPacket(int pri, const char* func, const char* msg) {
+  char packet[192];
+  time_t now = time(nullptr);
+  struct tm* t = gmtime(&now);
+  char ts[20];
+  strftime(ts, sizeof(ts), "%b %d %H:%M:%S", t);
+
+  // Build hostname from sensor number — works before buildDerivedConfig()
+  // and produces the same value as SENSOR_ID once it is built
+  char hostname[16];
+  if (cfg.sensorNumber > 0) {
+    snprintf(hostname, sizeof(hostname), "sensor%d", cfg.sensorNumber);
+  } else {
+    strncpy(hostname, "sensor?", sizeof(hostname));
+  }
+
+  snprintf(packet, sizeof(packet), "<%d>%s %s %s: %s",
+    pri, ts, hostname, func, msg);
+
+  udpSyslog.beginPacket(cfg.syslogServer, cfg.syslogPort);
+  udpSyslog.write((const uint8_t*)packet, strlen(packet));
+  udpSyslog.endPacket();
+}
+
+void logMessage(int pri, const char* func, const char* fmt, ...) {
+  char msg[SYSLOG_MAX_MSG];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, args);
+  va_end(args);
+
+  // Always write to serial
+  Serial.printf("[%s] %s\n", func, msg);
+
+  // Syslog path
+  if (!strlen(cfg.syslogServer)) return;   // syslog not configured
+
+  if (syslogReady) {
+    // WiFi is up — send immediately
+    sendSyslogPacket(pri, func, msg);
+  } else {
+    // WiFi not yet up — enqueue for later
+    if (syslogQueueLen < SYSLOG_QUEUE_LEN) {
+      int idx = (syslogQueueHead + syslogQueueLen) % SYSLOG_QUEUE_LEN;
+      syslogQueue[idx].pri = pri;
+      strncpy(syslogQueue[idx].func, func, sizeof(syslogQueue[idx].func) - 1);
+      strncpy(syslogQueue[idx].msg,  msg,  sizeof(syslogQueue[idx].msg)  - 1);
+      syslogQueueLen++;
+    }
+    // Queue full — drop silently rather than crash
+  }
+}
+
+// Convenience macro — captures function name automatically
+#define LOG(fmt, ...)     logMessage(SYSLOG_PRI_INFO, __func__, fmt, ##__VA_ARGS__)
+#define LOG_ERR(fmt, ...) logMessage(SYSLOG_PRI_ERR,  __func__, fmt, ##__VA_ARGS__)
+
+
+void flushSyslogQueue() {
+  if (!strlen(cfg.syslogServer)) return;
+  if (syslogQueueLen == 0) return;
+
+  syslogReady = true;   // mark ready before flush so sendSyslogPacket works
+
+  Serial.printf("[flushSyslogQueue] flushing %d queued messages to syslog\n",
+    syslogQueueLen);
+
+  for (int i = 0; i < syslogQueueLen; i++) {
+    int idx = (syslogQueueHead + i) % SYSLOG_QUEUE_LEN;
+    sendSyslogPacket(
+      syslogQueue[idx].pri,
+      syslogQueue[idx].func,
+      syslogQueue[idx].msg
+    );
+    delay(5);   // brief gap to avoid flooding the syslog server
+  }
+
+  syslogQueueHead = 0;
+  syslogQueueLen  = 0;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -215,6 +335,11 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
   .chk-row{display:flex;align-items:center;gap:8px;margin-top:14px}
   .chk-row input{width:auto;margin:0}
   h3{font-size:.95em;color:#555;margin:16px 0 4px}
+  .pw-wrap{position:relative;margin-top:4px}
+  .pw-wrap input{width:100%;padding-right:44px;box-sizing:border-box;margin-top:0}
+  .pw-eye{position:absolute;right:10px;top:50%;transform:translateY(-50%);
+    background:none;border:none;cursor:pointer;padding:4px;color:#888;
+    width:auto;font-size:1.1em;line-height:1}
 </style>
 </head>
 <body>
@@ -235,10 +360,14 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
     <label>WiFi SSID
       <input type="text" name="ssid" placeholder="Your network name" required>
     </label>
-    <label>WiFi password <span class="optional">(optional)</span>
-      <input type="password" name="wifiPass"
+    <label>WiFi password <span class="optional">(optional)</span></label>
+    <div class="pw-wrap">
+      <input type="password" id="wifiPass" name="wifiPass"
         placeholder="Leave blank for open networks">
-    </label>
+      <button type="button" class="pw-eye" onclick="togglePw('wifiPass',this)"
+        title="Show/hide password">&#128065;</button>
+    </div>
+
     <div class="chk-row">
       <input type="checkbox" name="staticIP" id="staticChk"
         onchange="toggleNet(this)">
@@ -259,35 +388,35 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 
       <h3>Gateway (router)</h3>
       <div class="ip-wrap">
-        <input type="number" name="gw1" id="gw1" value="192" min="0" max="255">
+        <input type="number" name="gw1" value="192" min="0" max="255">
         <span>.</span>
-        <input type="number" name="gw2" id="gw2" value="168" min="0" max="255">
+        <input type="number" name="gw2" value="168" min="0" max="255">
         <span>.</span>
-        <input type="number" name="gw3" id="gw3" value="1" min="0" max="255">
+        <input type="number" name="gw3" value="1" min="0" max="255">
         <span>.</span>
-        <input type="number" name="gw4" id="gw4" value="1" min="0" max="255">
+        <input type="number" name="gw4" value="1" min="0" max="255">
       </div>
 
       <h3>Subnet mask</h3>
       <div class="ip-wrap">
-        <input type="number" name="sn1" id="sn1" value="255" min="0" max="255">
+        <input type="number" name="sn1" value="255" min="0" max="255">
         <span>.</span>
-        <input type="number" name="sn2" id="sn2" value="255" min="0" max="255">
+        <input type="number" name="sn2" value="255" min="0" max="255">
         <span>.</span>
-        <input type="number" name="sn3" id="sn3" value="0" min="0" max="255">
+        <input type="number" name="sn3" value="0" min="0" max="255">
         <span>.</span>
-        <input type="number" name="sn4" id="sn4" value="0" min="0" max="255">
+        <input type="number" name="sn4" value="0" min="0" max="255">
       </div>
 
       <h3>DNS server</h3>
       <div class="ip-wrap">
-        <input type="number" name="dns1" id="dns1" value="192" min="0" max="255">
+        <input type="number" name="dns1" value="192" min="0" max="255">
         <span>.</span>
-        <input type="number" name="dns2" id="dns2" value="168" min="0" max="255">
+        <input type="number" name="dns2" value="168" min="0" max="255">
         <span>.</span>
-        <input type="number" name="dns3" id="dns3" value="1" min="0" max="255">
+        <input type="number" name="dns3" value="1" min="0" max="255">
         <span>.</span>
-        <input type="number" name="dns4" id="dns4" value="1" min="0" max="255">
+        <input type="number" name="dns4" value="1" min="0" max="255">
       </div>
     </div>
   </div>
@@ -303,10 +432,26 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
       <input type="text" name="mqttUser"
         placeholder="Leave blank if not required">
     </label>
-    <label>MQTT password <span class="optional">(optional)</span>
-      <input type="password" name="mqttPass"
+    <label>MQTT password <span class="optional">(optional)</span></label>
+    <div class="pw-wrap">
+      <input type="password" id="mqttPass" name="mqttPass"
         placeholder="Leave blank if not required">
+      <button type="button" class="pw-eye" onclick="togglePw('mqttPass',this)"
+        title="Show/hide password">&#128065;</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <label>Syslog server <span class="optional">(optional)</span>
+      <input type="text" name="syslogServer"
+        placeholder="logs">
     </label>
+    <label>Syslog port
+      <input type="number" name="syslogPort" value="514">
+    </label>
+    <p class="hint">UDP syslog (RFC 3164). All log output is mirrored here.
+      Compatible with rsyslog, syslog-ng, Graylog, and the Home Assistant
+      Syslog add-on.</p>
   </div>
 
   <button type="submit">Save &amp; Restart</button>
@@ -315,12 +460,24 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 <script>
 function syncNet() {
   var n = document.getElementById('sensorNum').value;
-  document.getElementById('ip4').value = n;
+  if (document.getElementById('staticChk').checked) {
+    document.getElementById('ip4').value = n;
+  }
 }
 function toggleNet(cb) {
   document.getElementById('network-rows').style.display =
     cb.checked ? 'block' : 'none';
   if (cb.checked) syncNet();
+}
+function togglePw(id, btn) {
+  var inp = document.getElementById(id);
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    btn.style.color = '#2c7a4b';
+  } else {
+    inp.type = 'password';
+    btn.style.color = '#888';
+  }
 }
 </script>
 </body>
@@ -360,6 +517,8 @@ void handleSave() {
   bool staticIp  = server.hasArg("staticIP");
   int  port      = server.arg("mqttPort").toInt();
   if (port == 0) port = 1883;
+  int  syslogPort = server.arg("syslogPort").toInt();
+  if (syslogPort == 0) syslogPort = 514;
 
   uint8_t ip0  = staticIp ? server.arg("ip1").toInt()  : 192;
   uint8_t ip1  = staticIp ? server.arg("ip2").toInt()  : 168;
@@ -390,7 +549,9 @@ void handleSave() {
     server.arg("mqttBroker").c_str(),
     port,
     server.arg("mqttUser").c_str(),
-    server.arg("mqttPass").c_str()
+    server.arg("mqttPass").c_str(),
+    server.arg("syslogServer").c_str(),
+    syslogPort
   );
 
   server.send_P(200, "text/html", SAVED_HTML);
@@ -431,7 +592,8 @@ void startConfigPortal() {
   server.onNotFound(handleNotFound);
   server.begin();
 
-  unsigned long deadline = millis() + (unsigned long)AP_TIMEOUT_MIN * 60 * 1000UL;
+  unsigned long deadline =
+    millis() + (unsigned long)AP_TIMEOUT_MIN * 60 * 1000UL;
 
   while (millis() < deadline) {
     dnsServer.processNextRequest();
@@ -448,25 +610,23 @@ void startConfigPortal() {
   esp_deep_sleep_start();
 }
 
-
 // ═══════════════════════════════════════════════════════════
-//  FOTA (automatic update from GitHub Releases)
+//  FOTA
 // ═══════════════════════════════════════════════════════════
 
 void checkForUpdate() {
-  Serial.println("FOTA      — checking for update...");
+  LOG("checking for update...");
 
   WiFiClientSecure client;
-  client.setInsecure();   // skip cert validation — acceptable for own repo
+  client.setInsecure();
 
-  // Fetch version.txt from latest release
   HTTPClient http;
   http.begin(client, FOTA_VERSION_URL);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   int code = http.GET();
 
   if (code != 200) {
-    Serial.printf("FOTA      — version check failed (HTTP %d)\n", code);
+    LOG_ERR("version check failed (HTTP %d)", code);
     http.end();
     return;
   }
@@ -475,27 +635,20 @@ void checkForUpdate() {
   remoteVersion.trim();
   http.end();
 
-  Serial.printf("FOTA      — local: %s  remote: %s\n",
-    FIRMWARE_VERSION, remoteVersion.c_str());
+  LOG("local: %s  remote: %s", FIRMWARE_VERSION, remoteVersion.c_str());
 
   if (remoteVersion == FIRMWARE_VERSION) {
-    Serial.println("FOTA      — firmware is current, no update needed");
+    LOG("firmware is current, no update needed");
     return;
   }
 
-  Serial.printf("FOTA      — update available: %s → %s, downloading...\n",
+  LOG("update available: %s to %s, downloading...",
     FIRMWARE_VERSION, remoteVersion.c_str());
 
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  httpUpdate.onStart([]() {
-    Serial.println("FOTA      — flashing...");
-  });
-  httpUpdate.onEnd([]() {
-    Serial.println("FOTA      — flash complete");
-  });
-  httpUpdate.onError([](int e) {
-    Serial.printf("FOTA      — error: %d\n", e);
-  });
+  httpUpdate.onStart([]()     { LOG("flashing..."); });
+  httpUpdate.onEnd([]()       { LOG("flash complete"); });
+  httpUpdate.onError([](int e){ LOG_ERR("error: %d", e); });
   httpUpdate.onProgress([](int cur, int tot) {
     Serial.printf("FOTA      — %d%%\r", (cur * 100) / tot);
   });
@@ -504,15 +657,13 @@ void checkForUpdate() {
 
   switch (result) {
     case HTTP_UPDATE_FAILED:
-      Serial.printf("FOTA      — failed: %s\n",
-        httpUpdate.getLastErrorString().c_str());
+      LOG_ERR("failed: %s", httpUpdate.getLastErrorString().c_str());
       break;
     case HTTP_UPDATE_NO_UPDATES:
-      Serial.println("FOTA      — no update");
+      LOG("no update available");
       break;
     case HTTP_UPDATE_OK:
-      // HTTPUpdate restarts automatically — this line is never reached
-      break;
+      break;   // restarts automatically
   }
 }
 
@@ -522,18 +673,18 @@ void checkForUpdate() {
 
 bool syncNTP() {
   configTime(GMT_OFFSET_S, DST_OFFSET_S, NTP_SERVER);
-  Serial.print("NTP       — syncing");
+  LOG("syncing...");
   struct tm t;
   unsigned long start = millis();
   while (!getLocalTime(&t)) {
     if (millis() - start >= NTP_TIMEOUT_MS) {
-      Serial.println("\nNTP       — timed out after 10s, timestamp will be omitted");
+      LOG_ERR("timed out after 10s, timestamp will be omitted");
       return false;
     }
     delay(500);
     Serial.print(".");
   }
-  Serial.printf("\nNTP       — synced: %04d-%02d-%02dT%02d:%02d:%02dZ\n",
+  LOG("synced: %04d-%02d-%02dT%02d:%02d:%02dZ",
     t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
     t.tm_hour, t.tm_min, t.tm_sec);
   return true;
@@ -559,18 +710,18 @@ void checkReedSwitch() {
   delay(50);
 
   if (digitalRead(REED_PIN) == LOW) {
-    Serial.println("Reed      — magnet detected, waiting to confirm...");
+    LOG("magnet detected, waiting to confirm...");
     unsigned long holdStart = millis();
     while (digitalRead(REED_PIN) == LOW) {
       if (millis() - holdStart >= REED_HOLD_MS) {
-        Serial.println("Reed      — confirmed, restarting");
+        LOG("confirmed, restarting");
         Serial.flush();
         delay(200);
         ESP.restart();
       }
       delay(50);
     }
-    Serial.println("Reed      — magnet removed early, ignoring");
+    LOG("magnet removed early, ignoring");
   }
 }
 
@@ -579,7 +730,7 @@ void checkReedSwitch() {
 // ═══════════════════════════════════════════════════════════
 
 void goToSleep() {
-  Serial.printf("Sleep     — going to sleep for %d minutes\n", SLEEP_MINUTES);
+  LOG("going to sleep for %d minutes", SLEEP_MINUTES);
   Serial.flush();
   esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60 * 1000000ULL);
   esp_deep_sleep_start();
@@ -593,10 +744,10 @@ int readMoisture() {
     sum += analogReadMilliVolts(MOISTURE_PIN);
     delay(10);
   }
-  int avgMv = sum / 10;
+  int avgMv   = sum / 10;
   int percent = map(avgMv, DRY_MV, WET_MV, 0, 100);
-  percent = constrain(percent, 0, 100);
-  Serial.printf("Moisture  — raw: %dmV  →  %d%%\n", avgMv, percent);
+  percent     = constrain(percent, 0, 100);
+  LOG("raw: %dmV  ->  %d%%", avgMv, percent);
   return avgMv;
 }
 
@@ -610,17 +761,18 @@ float readBatteryVoltage(int &rawMv) {
   rawMv = sum / 16;
   float voltage = (rawMv / 1000.0 * DIVIDER_RATIO) + BAT_CAL_OFFSET;
   if (voltage < BAT_MIN || voltage > BAT_MAX) {
-    Serial.printf("Battery   — suspicious reading %.2fV (raw: %dmV), discarding\n",
-      voltage, rawMv);
+    LOG_ERR("suspicious reading %.2fV (raw: %dmV), discarding", voltage, rawMv);
     return -1.0;
   }
-  Serial.printf("Battery   — raw: %dmV  →  %.2fV\n", rawMv, voltage);
+  LOG("raw: %dmV  ->  %.2fV", rawMv, voltage);
   return voltage;
 }
 
 int batteryPercent(float voltage) {
-  const float v[] = { 3.00, 3.10, 3.25, 3.50, 3.60, 3.70, 3.80, 3.90, 4.00, 4.10, 4.20 };
-  const int   p[] = {    0,    5,   10,   20,   35,   50,   65,   80,   90,   95,  100 };
+  const float v[] = { 3.00, 3.10, 3.25, 3.50, 3.60,
+                      3.70, 3.80, 3.90, 4.00, 4.10, 4.20 };
+  const int   p[] = {    0,    5,   10,   20,   35,
+                        50,   65,   80,   90,   95,  100 };
   const int   n   = sizeof(v) / sizeof(v[0]);
 
   if (voltage <= v[0])   return 0;
@@ -648,11 +800,11 @@ bool connectWifi() {
     IPAddress sn (cfg.sn[0],  cfg.sn[1],  cfg.sn[2],  cfg.sn[3]);
     IPAddress dns(cfg.dns[0], cfg.dns[1], cfg.dns[2], cfg.dns[3]);
     if (!WiFi.config(ip, gw, sn, dns)) {
-      Serial.println("WiFi      — static IP config failed");
+      LOG_ERR("static IP config failed");
     }
   }
 
-  Serial.printf("WiFi      — connecting to %s", cfg.wifiSSID);
+  LOG("connecting to %s", cfg.wifiSSID);
   WiFi.begin(cfg.wifiSSID,
     strlen(cfg.wifiPassword) > 0 ? cfg.wifiPassword : nullptr);
 
@@ -662,14 +814,14 @@ bool connectWifi() {
     Serial.print(".");
     attempts++;
   }
+  Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\nWiFi      — connected, IP: %s\n",
-      WiFi.localIP().toString().c_str());
+    LOG("connected, IP: %s", WiFi.localIP().toString().c_str());
     return true;
   }
 
-  Serial.println("\nWiFi      — failed");
+  LOG_ERR("WiFi failed after %d attempts", attempts);
   return false;
 }
 
@@ -690,9 +842,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   memcpy(cmdPayload, payload, length);
   cmdPayload[length] = '\0';
   cmdReceived = true;
-  Serial.printf("Command   — received: %s\n", cmdPayload);
+  LOG("received: %s", cmdPayload);
 
-  // Clear retained message immediately so it only fires once
+  // Clear retained message immediately
   mqtt.publish(CMD_TOPIC, "", true);
   mqtt.loop();
 }
@@ -702,8 +854,7 @@ void connectMqtt() {
   mqtt.setBufferSize(512);
   mqtt.setCallback(mqttCallback);
   String clientId = String("garden-") + SENSOR_ID;
-  Serial.printf("MQTT      — connecting to %s as %s\n",
-    cfg.mqttBroker, clientId.c_str());
+  LOG("connecting to %s as %s", cfg.mqttBroker, clientId.c_str());
 
   int attempts = 0;
   while (!mqtt.connected() && attempts < 5) {
@@ -712,18 +863,18 @@ void connectMqtt() {
       : mqtt.connect(clientId.c_str());
 
     if (ok) {
-      Serial.println("MQTT      — connected");
+      LOG("connected");
       mqtt.subscribe(CMD_TOPIC);
-      Serial.printf("MQTT      — subscribed to %s\n", CMD_TOPIC);
+      LOG("subscribed to %s", CMD_TOPIC);
     } else {
-      Serial.printf("MQTT      — failed (rc=%d), retrying\n", mqtt.state());
+      LOG_ERR("failed (rc=%d), retrying", mqtt.state());
       delay(500);
       attempts++;
     }
   }
 
   if (!mqtt.connected()) {
-    Serial.println("MQTT      — could not connect, going to sleep");
+    LOG_ERR("could not connect, going to sleep");
     goToSleep();
   }
 }
@@ -733,20 +884,20 @@ void processMqttCommand() {
   cmdReceived = false;
 
   if (strcmp(cmdPayload, "reset") == 0) {
-    Serial.println("Command   — resetting config and restarting into portal");
+    LOG("resetting config and restarting into portal");
     Serial.flush();
     delay(200);
     clearConfig();
     ESP.restart();
 
   } else if (strcmp(cmdPayload, "restart") == 0) {
-    Serial.println("Command   — restarting");
+    LOG("restarting");
     Serial.flush();
     delay(200);
     ESP.restart();
 
   } else {
-    Serial.printf("Command   — unknown: %s\n", cmdPayload);
+    LOG_ERR("unknown command: %s", cmdPayload);
   }
 }
 
@@ -804,7 +955,7 @@ void publishDiscovery() {
   mqtt.publish(DISC_TS, payload, true);
   mqtt.loop(); delay(50);
 
-  Serial.println("Discovery — complete");
+  LOG("discovery complete");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -819,6 +970,9 @@ void setup() {
   Serial.printf(   "║   Firmware v%-12s ║\n", FIRMWARE_VERSION);
   Serial.println(  "╚══════════════════════════╝");
 
+  // ── Load config first so syslog server address is available ──
+  loadConfig();
+
   // ── Reed switch check ─────────────────────────────────────
   checkReedSwitch();
 
@@ -826,11 +980,11 @@ void setup() {
   pinMode(BTN_BOOT, INPUT_PULLUP);
   delay(100);
   if (digitalRead(BTN_BOOT) == LOW) {
-    Serial.println("Config    — boot button held, waiting to confirm...");
+    LOG("boot button held, waiting to confirm...");
     unsigned long holdStart = millis();
     while (digitalRead(BTN_BOOT) == LOW) {
       if (millis() - holdStart >= BOOT_HOLD_MS) {
-        Serial.println("Config    — confirmed, clearing config");
+        LOG("confirmed, clearing config");
         clearConfig();
         delay(200);
         startConfigPortal();
@@ -838,21 +992,20 @@ void setup() {
       }
       delay(50);
     }
-    Serial.println("Config    — button released early, continuing normal boot");
+    LOG("button released early, continuing normal boot");
   }
 
-  // ── Load config ───────────────────────────────────────────
-  loadConfig();
-
   if (!configLoaded) {
-    Serial.println("Config    — none found, starting portal");
+    LOG("no config found, starting portal");
     startConfigPortal();
     return;
   }
 
   buildDerivedConfig();
-  Serial.printf("Config    — sensor%d, SSID: %s, broker: %s\n",
-    cfg.sensorNumber, cfg.wifiSSID, cfg.mqttBroker);
+  LOG("sensor%d, SSID: %s, broker: %s, syslog: %s:%d",
+    cfg.sensorNumber, cfg.wifiSSID, cfg.mqttBroker,
+    strlen(cfg.syslogServer) ? cfg.syslogServer : "disabled",
+    cfg.syslogPort);
 
   // ── Read sensors before WiFi — radio noise affects ADC ───
   int   moistureRawMv = readMoisture();
@@ -865,19 +1018,23 @@ void setup() {
 
   // ── Connect WiFi — open portal if it fails ────────────────
   if (!connectWifi()) {
-    Serial.println("Config    — WiFi failed, starting portal");
+    LOG_ERR("WiFi failed, starting portal");
     startConfigPortal();
     return;
   }
+  // ── WiFi is up — initialise UDP then flush queued syslog messages ──
+  if (strlen(cfg.syslogServer)) {
+    udpSyslog.begin(0);   // bind to any local port for sending
+  }
+  // ── WiFi is up — flush queued syslog messages then mark ready ──
+  flushSyslogQueue();
+  syslogReady = true;
 
   // ── NTP sync (10s timeout) ───────────────────────────────
   syncNTP();
 
-  // ── FOTA check — auto-update from GitHub Releases ────────
+  // ── FOTA check ───────────────────────────────────────────
   checkForUpdate();
-  // Note: restarts automatically if update applied, continues if not
-
-  
 
   // ── MQTT ─────────────────────────────────────────────────
   connectMqtt();
@@ -906,17 +1063,16 @@ void setup() {
         FIRMWARE_VERSION, timestamp);
     }
     bool ok = mqtt.publish(STATE_TOPIC, payload, true);
-    Serial.printf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
+    LOG("%s: %s", ok ? "published" : "FAILED", payload);
 
     // ── Listen for incoming commands ──────────────────────
-    Serial.println("MQTT      — listening for commands...");
+    LOG("listening for commands...");
     unsigned long listenDeadline = millis() + CMD_LISTEN_MS;
     while (millis() < listenDeadline) {
       mqtt.loop();
       delay(10);
     }
 
-    // Act on any command received — restart/reset will not return
     processMqttCommand();
   }
 
