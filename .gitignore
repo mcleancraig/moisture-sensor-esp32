@@ -1,3 +1,5 @@
 .env
 secrets.h
 version.txt
+.DS_Store
+build/

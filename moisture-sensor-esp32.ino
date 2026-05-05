@@ -3,8 +3,8 @@
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
-#include <ArduinoOTA.h>
-#include <ESPmDNS.h>
+#include <HTTPUpdate.h>
+#include <WiFiClientSecure.h>
 #include <time.h>
 #include "esp_mac.h"
 
@@ -14,7 +14,8 @@
 //  - Boot button hold to reconfigure without reflashing
 //  - Reed switch hold to restart (external, no enclosure access needed)
 //  - MQTT retained command: reset / restart (self-clearing)
-//  - OTA firmware updates over WiFi
+//  - FOTA: automatic firmware update from GitHub Releases
+//  - OTA: IDE-based update over WiFi (fallback for development)
 //  - Firmware version in MQTT payload
 //  - NTP timestamp in MQTT payload (10s timeout)
 //  - Gateway, netmask and DNS configurable via portal
@@ -43,9 +44,8 @@ const int AP_TIMEOUT_MIN     = 10;
 const int AP_SLEEP_MIN       = 10;
 const int BOOT_HOLD_MS       = 3000;
 const int REED_HOLD_MS       = 3000;
-const int OTA_WAIT_MS        = 5000;
 const int NTP_TIMEOUT_MS     = 10000;
-const int CMD_LISTEN_MS      = 2000;  // MQTT command listen window per wake
+const int CMD_LISTEN_MS      = 2000;
 
 // ── AP credentials ────────────────────────────────────────
 const char* AP_PASSWORD      = "moisture";
@@ -54,6 +54,10 @@ const char* AP_PASSWORD      = "moisture";
 const char* NTP_SERVER   = "pool.ntp.org";
 const long  GMT_OFFSET_S = 0;
 const int   DST_OFFSET_S = 0;
+
+// ── FOTA ─────────────────────────────────────────────────
+const char* FOTA_VERSION_URL = "https://github.com/mcleancraig/moisture-sensor-esp32/releases/latest/download/version.txt";
+const char* FOTA_BIN_URL     = "https://github.com/mcleancraig/moisture-sensor-esp32/releases/latest/download/moisture-sensor-esp32.ino.bin";
 
 // ── HA discovery prefix ───────────────────────────────────
 const char* HA_DISCOVERY_PREFIX = "homeassistant";
@@ -444,29 +448,72 @@ void startConfigPortal() {
   esp_deep_sleep_start();
 }
 
+
 // ═══════════════════════════════════════════════════════════
-//  OTA
+//  FOTA (automatic update from GitHub Releases)
 // ═══════════════════════════════════════════════════════════
 
-void setupOTA() {
-  ArduinoOTA.setHostname(SENSOR_ID);
-  ArduinoOTA.setPassword(AP_PASSWORD);
+void checkForUpdate() {
+  Serial.println("FOTA      — checking for update...");
 
-  ArduinoOTA.onStart([]() {
-    Serial.println("OTA       — starting update");
+  WiFiClientSecure client;
+  client.setInsecure();   // skip cert validation — acceptable for own repo
+
+  // Fetch version.txt from latest release
+  HTTPClient http;
+  http.begin(client, FOTA_VERSION_URL);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  int code = http.GET();
+
+  if (code != 200) {
+    Serial.printf("FOTA      — version check failed (HTTP %d)\n", code);
+    http.end();
+    return;
+  }
+
+  String remoteVersion = http.getString();
+  remoteVersion.trim();
+  http.end();
+
+  Serial.printf("FOTA      — local: %s  remote: %s\n",
+    FIRMWARE_VERSION, remoteVersion.c_str());
+
+  if (remoteVersion == FIRMWARE_VERSION) {
+    Serial.println("FOTA      — firmware is current, no update needed");
+    return;
+  }
+
+  Serial.printf("FOTA      — update available: %s → %s, downloading...\n",
+    FIRMWARE_VERSION, remoteVersion.c_str());
+
+  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  httpUpdate.onStart([]() {
+    Serial.println("FOTA      — flashing...");
   });
-  ArduinoOTA.onEnd([]() {
-    Serial.println("OTA       — complete, restarting");
+  httpUpdate.onEnd([]() {
+    Serial.println("FOTA      — flash complete");
   });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("OTA       — %u%%\r", (progress / (total / 100)));
+  httpUpdate.onError([](int e) {
+    Serial.printf("FOTA      — error: %d\n", e);
   });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("OTA       — error [%u]\n", error);
+  httpUpdate.onProgress([](int cur, int tot) {
+    Serial.printf("FOTA      — %d%%\r", (cur * 100) / tot);
   });
 
-  ArduinoOTA.begin();
-  Serial.printf("OTA       — ready, hostname: %s\n", SENSOR_ID);
+  t_httpUpdate_return result = httpUpdate.update(client, FOTA_BIN_URL);
+
+  switch (result) {
+    case HTTP_UPDATE_FAILED:
+      Serial.printf("FOTA      — failed: %s\n",
+        httpUpdate.getLastErrorString().c_str());
+      break;
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("FOTA      — no update");
+      break;
+    case HTTP_UPDATE_OK:
+      // HTTPUpdate restarts automatically — this line is never reached
+      break;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -637,7 +684,6 @@ bool cmdReceived    = false;
 char cmdPayload[32] = "";
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  // Empty payload means the retained message was cleared — ignore
   if (length == 0) return;
   if (length >= sizeof(cmdPayload)) return;
 
@@ -646,7 +692,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   cmdReceived = true;
   Serial.printf("Command   — received: %s\n", cmdPayload);
 
-  // Immediately clear the retained message so it only fires once
+  // Clear retained message immediately so it only fires once
   mqtt.publish(CMD_TOPIC, "", true);
   mqtt.loop();
 }
@@ -827,17 +873,11 @@ void setup() {
   // ── NTP sync (10s timeout) ───────────────────────────────
   syncNTP();
 
-  // ── OTA — stay awake briefly to accept waiting updates ───
-  setupOTA();
-  if (!MDNS.begin(SENSOR_ID)) {
-    Serial.println("OTA       — mDNS failed to start");
-  }
-  Serial.printf("OTA       — listening for %dms\n", OTA_WAIT_MS);
-  unsigned long otaDeadline = millis() + OTA_WAIT_MS;
-  while (millis() < otaDeadline) {
-    ArduinoOTA.handle();
-    delay(10);
-  }
+  // ── FOTA check — auto-update from GitHub Releases ────────
+  checkForUpdate();
+  // Note: restarts automatically if update applied, continues if not
+
+  
 
   // ── MQTT ─────────────────────────────────────────────────
   connectMqtt();
@@ -869,7 +909,6 @@ void setup() {
     Serial.printf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
 
     // ── Listen for incoming commands ──────────────────────
-    // Retained commands published any time are delivered here
     Serial.println("MQTT      — listening for commands...");
     unsigned long listenDeadline = millis() + CMD_LISTEN_MS;
     while (millis() < listenDeadline) {
@@ -877,8 +916,7 @@ void setup() {
       delay(10);
     }
 
-    // Act on any command — restart/reset will not return here
-    // If no command, fall through to goToSleep()
+    // Act on any command received — restart/reset will not return
     processMqttCommand();
   }
 

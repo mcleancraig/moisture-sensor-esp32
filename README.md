@@ -11,11 +11,14 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 - Capacitive soil moisture reading (0–100%)
 - Battery voltage and percentage monitoring
 - WiFi provisioning via captive portal — no hardcoded credentials
-- Static or DHCP IP addressing
+- Static or DHCP IP addressing, with configurable gateway, subnet and DNS
 - Home Assistant MQTT autodiscovery — sensors appear automatically
-- Over-the-air (OTA) firmware updates
+- Automatic firmware updates via FOTA from GitHub Releases
 - Boot button reconfiguration — no reflashing needed to change settings
+- Reed switch restart — hold magnet to restart without opening enclosure
+- MQTT command support — send `reset` or `restart` remotely via retained message
 - Deep sleep between readings — ~15 minute cycle for long battery life
+- NTP timestamp in every MQTT payload
 - Firmware version reported in every MQTT payload
 
 ---
@@ -23,10 +26,6 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 ## Wiring diagram
 
 ![Wiring diagram](wiring-diagram.svg)
-
-
-The XIAO's onboard charger handles battery charging automatically when USB-C is connected. No external charge module is required.
-
 
 ---
 
@@ -39,32 +38,27 @@ The XIAO's onboard charger handles battery charging automatically when USB-C is 
 | MCU | Seeed XIAO ESP32-C6 |
 | Moisture sensor | HW-390 capacitive, 3-pin (VCC / GND / AOUT) |
 | Battery | 18650 Li-ion, 2000mAh recommended |
-<<<<<<< HEAD
-| Reverse polarity protection | None currently - working on a MOSFET solution |
-| Battery voltage divider | 2× 220kΩ resistors (BAT+ → A0 → GND) |
-=======
-| Reverse polarity protection | 1N5819 Schottky diode in series with battery positive |
-| Battery voltage divider | 2× 200kΩ resistors (BAT+ → A0 → GND) |
->>>>>>> refs/remotes/origin/main
+| Reverse polarity protection | None currently — P-channel MOSFET planned (see TODO) |
+| Battery voltage divider | 2x 200kOhm resistors (BAT+ to A0 to GND) |
 
+### Wiring
 
-<<<<<<< HEAD
 ```
-18650 (+) ─────────────────────────────┬── XIAO BAT+ pad
-                                       └── 220kΩ ── A0 ── 220kΩ ── GND
+18650 (+) ──────────────────────────── XIAO BAT+ pad
+                                        └── 200kOhm ── A0 ── 200kOhm ── GND
 
 18650 (−) ────────────────────────────── XIAO BAT− pad ── GND
 
 HW-390 VCC  ── XIAO 3V3
 HW-390 GND  ── GND
 HW-390 AOUT ── XIAO A1 (GPIO1)
+
+Reed switch ── GPIO3 ── GND  (normally open, INPUT_PULLUP)
 ```
 
-The XIAO's onboard charger handles battery charging automatically when USB-C is connected. No external charge module is required.
+The XIAO's onboard charger handles battery charging automatically when USB-C is connected. USB and battery can be connected simultaneously — this is normal and required for charging.
 
-**Important:** Disconnect the battery before connecting USB for flashing. The onboard regulator can be damaged if both are connected simultaneously without a diode on the 5V pin.
-=======
->>>>>>> refs/remotes/origin/main
+**Note:** No reverse polarity protection is currently fitted. Always check battery orientation before connecting.
 
 ---
 
@@ -82,7 +76,7 @@ Install via the Library Manager:
 
 - **PubSubClient** by Nick O'Leary
 
-All other libraries (`WiFi`, `WebServer`, `DNSServer`, `Preferences`, `ArduinoOTA`, `ESPmDNS`) are included in the ESP32 Arduino core.
+All other libraries (`WiFi`, `WebServer`, `DNSServer`, `Preferences`, `HTTPUpdate`, `WiFiClientSecure`, `ESPmDNS`) are included in the ESP32 Arduino core.
 
 ---
 
@@ -115,7 +109,7 @@ where `XXXXXXXXXXXX` is the device's unique MAC address.
 3. Fill in the form:
    - **Sensor number** — sets the sensor ID (`sensor1`, `sensor2` etc), friendly name, and default static IP last octet
    - **WiFi SSID and password** — your home network credentials
-   - **Static IP** — optional. Check the box to assign a fixed IP address (recommended for reliable OTA updates). Defaults to `192.168.220.<sensor number>`
+   - **Static IP** — optional. Check the box to assign a fixed IP address. Defaults to `192.168.220.<sensor number>`. When enabled, also configure gateway, subnet mask and DNS
    - **MQTT broker address** — IP address of your MQTT broker (e.g. your Raspberry Pi)
    - **MQTT port** — default 1883
    - **MQTT username / password** — leave blank if your broker does not require authentication
@@ -129,15 +123,43 @@ If the portal is not used within 10 minutes it will close, the sensor sleeps for
 
 ## Reconfiguring a deployed sensor
 
-To change any setting (WiFi password, MQTT broker, sensor number etc) without reflashing:
+### Boot button (physical access required)
 
 1. Power the sensor on while holding the **boot button** on the XIAO board
 2. Hold for 3 seconds until the serial monitor shows `Config — confirmed, clearing config`
-3. Release the button
-4. The sensor starts the configuration portal
-5. Connect to the `MOISTURE_` network and reconfigure as above
+3. Release the button — the sensor starts the configuration portal
 
-A brief press (under 3 seconds) is ignored — normal boot continues.
+A brief press under 3 seconds is ignored — normal boot continues.
+
+### Reed switch (no enclosure access needed)
+
+Hold a magnet against the outside of the enclosure for 3 seconds — the sensor restarts. To trigger a full config reset without physical access, use the MQTT command below.
+
+### MQTT command (fully remote)
+
+Publish a retained message to `garden/sensorN/cmd`. The sensor receives it on its next wake cycle, self-clears the retained message, then acts on it:
+
+```bash
+# Reset config and open portal:
+mosquitto_pub -h localhost -u USER -P PASS \
+  -t "garden/sensor1/cmd" -m "reset" --retain
+
+# Soft restart only:
+mosquitto_pub -h localhost -u USER -P PASS \
+  -t "garden/sensor1/cmd" -m "restart" --retain
+
+# Cancel a pending command:
+mosquitto_pub -h localhost -u USER -P PASS \
+  -t "garden/sensor1/cmd" -m "" --retain
+```
+
+From Home Assistant **Developer Tools → Actions → mqtt.publish**:
+
+```yaml
+topic: garden/sensor1/cmd
+payload: reset
+retain: true
+```
 
 ---
 
@@ -149,13 +171,14 @@ The sensor uses MQTT autodiscovery. Once MQTT is configured in Home Assistant:
 2. Ensure **Enable discovery** is checked and the discovery prefix is `homeassistant`
 3. On next sensor boot, a new device will appear automatically under **Settings → Devices**
 
-Each sensor creates three entities in Home Assistant:
+Each sensor creates these entities in Home Assistant:
 
 | Entity | Unit | Notes |
 |---|---|---|
 | Moisture | % | Soil moisture level |
 | Battery | % | Estimated charge remaining |
 | Battery Voltage | V | Raw cell voltage |
+| Last Seen | — | NTP timestamp of last reading (UTC) |
 
 The device card also shows the firmware version (`sw_version`) on the device info page.
 
@@ -163,10 +186,12 @@ The device card also shows the firmware version (`sw_version`) on the device inf
 
 | Topic | Direction | Content |
 |---|---|---|
-| `garden/sensor1/state` | Sensor → broker | JSON state payload |
-| `homeassistant/sensor/sensor1_moisture/config` | Sensor → broker | HA discovery config (retained) |
-| `homeassistant/sensor/sensor1_battery_v/config` | Sensor → broker | HA discovery config (retained) |
-| `homeassistant/sensor/sensor1_battery_pct/config` | Sensor → broker | HA discovery config (retained) |
+| `garden/sensor1/state` | Sensor to broker | JSON state payload |
+| `garden/sensor1/cmd` | Broker to sensor | Command: `reset` or `restart` (retained) |
+| `homeassistant/sensor/sensor1_moisture/config` | Sensor to broker | HA discovery config (retained) |
+| `homeassistant/sensor/sensor1_battery_v/config` | Sensor to broker | HA discovery config (retained) |
+| `homeassistant/sensor/sensor1_battery_pct/config` | Sensor to broker | HA discovery config (retained) |
+| `homeassistant/sensor/sensor1_ts/config` | Sensor to broker | HA discovery config (retained) |
 
 ### State payload example
 
@@ -180,26 +205,35 @@ The device card also shows the firmware version (`sw_version`) on the device inf
   "battery_v": 3.87,
   "battery_pct": 62,
   "battery_raw_mv": 1935,
-  "fw": "2.0.0"
+  "fw": "2.3.0",
+  "ts": "2026-05-04T14:32:07Z"
 }
 ```
 
 ---
 
-## OTA firmware updates
+## Firmware updates (FOTA)
 
-After connecting to WiFi, each sensor listens for an OTA update for 5 seconds before going to sleep. To push an update:
+On each wake the sensor checks GitHub Releases for a newer firmware version and updates itself automatically. No IDE or physical access needed.
 
-1. Ensure you are on the same network as the sensor (VPN must be disconnected)
-2. In Arduino IDE, go to **Tools → Port** — the sensor should appear as a network port named `sensor1` (or its configured ID)
-3. Select that port
-4. Click **Upload** — the update will be pushed wirelessly
+**To release a firmware update:**
 
-**OTA password:** `moisture`
+1. Bump `FIRMWARE_VERSION` in the sketch
+2. In Arduino IDE go to **Sketch → Export Compiled Binary** — find the `.bin` file in your sketch folder
+3. Create a plain text file `version.txt` containing just the new version number (e.g. `2.3.0`) with no trailing whitespace
+4. Create a new GitHub release tagged `vX.X.X`, attach both `firmware.bin` and `version.txt` as release assets
+5. Every sensor will pick up the update automatically on its next wake cycle
 
-If you miss the 5-second window, wait for the next wake cycle (up to 15 minutes) or hold the boot button to force a reconfiguration, which keeps the portal open longer.
+The `fw` field in the MQTT payload confirms the running firmware version. If an update fails the sensor continues operating on the existing firmware and retries on the next wake.
 
-**Note:** The serial monitor is not available over the OTA network port — switch back to the USB port to view serial output after an OTA flash.
+**Tagging and releasing from the command line:**
+
+```bash
+git tag -a v2.3.0 -m "v2.3.0 release notes here"
+git push origin v2.3.0
+```
+
+Then on GitHub go to **Releases → Draft a new release**, select the tag, and attach `firmware.bin` and `version.txt`.
 
 ---
 
@@ -220,23 +254,26 @@ The HW-390 is inverted: dry soil reads a higher millivolt value than wet soil. `
 
 ## Battery life
 
-Based on a 15-minute sleep cycle, 5-second OTA window, and 2000mAh cell:
+Based on a 15-minute sleep cycle and 2000mAh cell:
 
 | Phase | Current | Duration per cycle |
 |---|---|---|
-| Deep sleep | ~15µA | ~895 seconds |
+| Deep sleep | ~15uA | ~895 seconds |
 | WiFi + MQTT | ~300mA peak | ~3 seconds |
-| OTA window | ~80mA | 5 seconds |
+| FOTA version check | ~80mA | ~2 seconds (no download if firmware is current) |
 
 Estimated runtime: **4–5 months** per charge. Actual runtime depends on WiFi signal strength, temperature, and cell quality.
 
-The battery percentage reported uses a piecewise linear interpolation of a real 18650 discharge curve, giving accurate readings across the full voltage range rather than fixed steps.
+The battery percentage uses a piecewise linear interpolation of a real 18650 discharge curve, giving accurate readings across the full voltage range rather than fixed steps.
 
 ---
 
 ## Factory reset
 
-To completely clear all configuration and return to first-boot state, flash the `clear-config` sketch located in the `clear-config/` folder. This sketch lives in its own folder — open it as a separate sketch in Arduino IDE, flash it, then re-flash the main sketch.
+To completely clear all configuration and return to first-boot state:
+
+- **Via MQTT:** send a retained `reset` command (see Reconfiguring a deployed sensor above) — no physical access needed
+- **Via USB:** flash the `clear-config` sketch in the `clear-config/` folder, then re-flash the main sketch
 
 ---
 
@@ -250,38 +287,35 @@ Each sensor needs only one change — the sensor number is set during portal con
 | 2 | sensor2 | garden/sensor2/state | 192.168.220.2 |
 | 3 | sensor3 | garden/sensor3/state | 192.168.220.3 |
 
-Sensor getting hot when USB connected
-Check battery polarity. Overheating is caused by reverse polarity on the battery connection, not by USB and battery being connected simultaneously. USB and battery can safely coexist — the onboard charger is designed for this. Verify the 1N5819 diode is fitted with anode toward the battery positive terminal.
+Each sensor must be calibrated individually as HW-390 units vary slightly from one another.
+
 ---
 
 ## Troubleshooting
 
 **Sensor not appearing in Home Assistant**
 Ensure MQTT integration is enabled in HA and discovery is turned on. Check the broker is reachable and credentials are correct by monitoring `garden/#` on the broker directly:
+
 ```bash
 mosquitto_sub -h localhost -t "garden/#" -v -u YOUR_USER -P YOUR_PASSWORD
 ```
 
-**OTA upload fails with "No response from device"**
-- Ensure you are not connected to a VPN — OTA uses UDP which VPNs frequently block
-- Check macOS firewall is not blocking Arduino IDE (System Settings → Network → Firewall → Options)
-- Confirm you are on the same network segment as the sensor
+**FOTA update not applying**
+- Ensure the sensor has internet access — verify DNS is configured correctly in the portal
+- Confirm `version.txt` is attached to the latest GitHub release and contains the correct version string with no trailing whitespace or newlines
+- Check the `fw` field in the MQTT payload to confirm what version is currently running
 
 **Moisture reading stuck at 0% or 100%**
 Recalibrate — the `DRY_MV` and `WET_MV` values in the firmware need to match your specific sensor unit. Check `moisture_raw_mv` in the MQTT payload and compare against your calibration readings.
 
 **Battery reading shows null**
-The battery reading falls outside the sanity check range (2.5V–4.3V). Check the voltage divider wiring — two 220kΩ resistors from BAT+ to A0 to GND. Confirm A0 is the pin connected to the midpoint, not A1.
+The battery reading falls outside the sanity check range (2.5V–4.3V). Check the voltage divider wiring — two 200kOhm resistors from BAT+ to A0 to GND. Confirm A0 is the pin connected to the midpoint, not A1.
 
 **Sensor getting hot when USB connected**
-<<<<<<< HEAD
-Check battery orientation carefully — no reverse polarity protection is currently fitted.
-=======
-Check battery polarity. Overheating is caused by reverse polarity on the battery connection, not by USB and battery being connected simultaneously. USB and battery can safely coexist — the onboard charger is designed for this. Verify the 1N5819 diode is fitted with anode toward the battery positive terminal.
->>>>>>> refs/remotes/origin/main
+Check battery polarity. Overheating is caused by reverse polarity on the battery connection, not by USB and battery being connected simultaneously. USB and battery can safely coexist — the onboard charger is designed for this. No polarity protection is currently fitted — always check battery orientation carefully before connecting.
 
 ---
 
 ## Licence
 
-GPL V2 - see LICENSE.md
+GPL V2 — see LICENSE.md
