@@ -325,6 +325,12 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
   .chk-row{display:flex;align-items:center;gap:8px;margin-top:14px}
   .chk-row input{width:auto;margin:0}
   h3{font-size:.95em;color:#555;margin:16px 0 4px}
+  .pw-wrap{position:relative;margin-top:4px}
+  .pw-wrap input{margin-top:0;padding-right:38px}
+  .pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);
+    width:auto;padding:4px;background:none;border:none;margin:0;
+    color:#888;cursor:pointer;display:flex;align-items:center;line-height:1}
+  .pw-toggle:hover{background:none;color:#333}
 </style>
 </head>
 <body>
@@ -346,8 +352,11 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
       <input type="text" name="ssid" placeholder="Your network name" required>
     </label>
     <label>WiFi password <span class="optional">(optional)</span>
-      <input type="password" name="wifiPass"
-        placeholder="Leave blank for open networks">
+      <div class="pw-wrap">
+        <input type="password" name="wifiPass"
+          placeholder="Leave blank for open networks">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" aria-label="Show password"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+      </div>
     </label>
     <div class="chk-row">
       <input type="checkbox" name="staticIP" id="staticChk"
@@ -414,8 +423,11 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
         placeholder="Leave blank if not required">
     </label>
     <label>MQTT password <span class="optional">(optional)</span>
-      <input type="password" name="mqttPass"
-        placeholder="Leave blank if not required">
+      <div class="pw-wrap">
+        <input type="password" name="mqttPass"
+          placeholder="Leave blank if not required">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" aria-label="Show password"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+      </div>
     </label>
   </div>
 
@@ -434,6 +446,15 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 </form>
 
 <script>
+var EYE     = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+var EYE_OFF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+function togglePw(btn) {
+  var inp = btn.previousElementSibling;
+  var show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  btn.innerHTML = show ? EYE_OFF : EYE;
+  btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+}
 function syncNet() {
   var n = document.getElementById('sensorNum').value;
   document.getElementById('ip4').value = n;
