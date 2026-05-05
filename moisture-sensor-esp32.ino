@@ -6,7 +6,6 @@
 #include <PubSubClient.h>
 #include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
-#include <WiFiUdp.h>
 #include <time.h>
 #include "esp_mac.h"
 
@@ -80,27 +79,6 @@ const char* FOTA_BIN_URL =
 // ── HA discovery prefix ───────────────────────────────────
 const char* HA_DISCOVERY_PREFIX = "homeassistant";
 
-// ── Syslog ───────────────────────────────────────────────
-// RFC 3164 facility 1 (user) + severity 6 (info)  = priority 14
-// RFC 3164 facility 1 (user) + severity 3 (error) = priority 11
-#define SYSLOG_PRI_INFO  14
-#define SYSLOG_PRI_ERR   11
-#define SYSLOG_MAX_MSG   128
-#define SYSLOG_QUEUE_LEN 20
-
-WiFiUDP udpSyslog;
-bool    syslogReady = false;   // true once WiFi is up and syslog configured
-
-// Pre-WiFi queue — stores messages until WiFi connects
-struct SyslogEntry {
-  int  pri;
-  char func[32];
-  char msg[SYSLOG_MAX_MSG];
-};
-SyslogEntry syslogQueue[SYSLOG_QUEUE_LEN];
-int syslogQueueHead = 0;
-int syslogQueueLen  = 0;
-
 // ═══════════════════════════════════════════════════════════
 //  RUNTIME CONFIG — loaded from NVS
 // ═══════════════════════════════════════════════════════════
@@ -170,6 +148,10 @@ void loadConfig() {
   configLoaded = (cfg.sensorNumber > 0 && strlen(cfg.wifiSSID) > 0 && strlen(cfg.mqttBroker) > 0);
 }
 
+// Forward use of _logf() — Arduino IDE generates the prototype; macro must be
+// defined before clearConfig()/saveConfig() so it resolves here, not to math.h.
+#define logf(fmt, ...) _logf(__func__, fmt, ##__VA_ARGS__)
+
 void clearConfig() {
   prefs.begin("sensor", false);
   prefs.clear();
@@ -195,91 +177,6 @@ void saveConfig(const Config& c) {
   prefs.putInt("syslogPort",    c.syslogPort);
   prefs.end();
   logf("Config    — saved to NVS\n");
-}
-
-// ═══════════════════════════════════════════════════════════
-//  LOGGING — serial + syslog with pre-WiFi queue
-// ═══════════════════════════════════════════════════════════
-
-void sendSyslogPacket(int pri, const char* func, const char* msg) {
-  char packet[192];
-  time_t now = time(nullptr);
-  struct tm* t = gmtime(&now);
-  char ts[20];
-  strftime(ts, sizeof(ts), "%b %d %H:%M:%S", t);
-
-  // Build hostname from sensor number — works before buildDerivedConfig()
-  // and produces the same value as SENSOR_ID once it is built
-  char hostname[16];
-  if (cfg.sensorNumber > 0) {
-    snprintf(hostname, sizeof(hostname), "sensor%d", cfg.sensorNumber);
-  } else {
-    strncpy(hostname, "sensor?", sizeof(hostname));
-  }
-
-  snprintf(packet, sizeof(packet), "<%d>%s %s %s: %s",
-    pri, ts, hostname, func, msg);
-
-  udpSyslog.beginPacket(cfg.syslogServer, cfg.syslogPort);
-  udpSyslog.write((const uint8_t*)packet, strlen(packet));
-  udpSyslog.endPacket();
-}
-
-void logMessage(int pri, const char* func, const char* fmt, ...) {
-  char msg[SYSLOG_MAX_MSG];
-  va_list args;
-  va_start(args, fmt);
-  vsnprintf(msg, sizeof(msg), fmt, args);
-  va_end(args);
-
-  // Always write to serial
-  Serial.printf("[%s] %s\n", func, msg);
-
-  // Syslog path
-  if (!strlen(cfg.syslogServer)) return;   // syslog not configured
-
-  if (syslogReady) {
-    // WiFi is up — send immediately
-    sendSyslogPacket(pri, func, msg);
-  } else {
-    // WiFi not yet up — enqueue for later
-    if (syslogQueueLen < SYSLOG_QUEUE_LEN) {
-      int idx = (syslogQueueHead + syslogQueueLen) % SYSLOG_QUEUE_LEN;
-      syslogQueue[idx].pri = pri;
-      strncpy(syslogQueue[idx].func, func, sizeof(syslogQueue[idx].func) - 1);
-      strncpy(syslogQueue[idx].msg,  msg,  sizeof(syslogQueue[idx].msg)  - 1);
-      syslogQueueLen++;
-    }
-    // Queue full — drop silently rather than crash
-  }
-}
-
-// Convenience macro — captures function name automatically
-#define LOG(fmt, ...)     logMessage(SYSLOG_PRI_INFO, __func__, fmt, ##__VA_ARGS__)
-#define LOG_ERR(fmt, ...) logMessage(SYSLOG_PRI_ERR,  __func__, fmt, ##__VA_ARGS__)
-
-
-void flushSyslogQueue() {
-  if (!strlen(cfg.syslogServer)) return;
-  if (syslogQueueLen == 0) return;
-
-  syslogReady = true;   // mark ready before flush so sendSyslogPacket works
-
-  Serial.printf("[flushSyslogQueue] flushing %d queued messages to syslog\n",
-    syslogQueueLen);
-
-  for (int i = 0; i < syslogQueueLen; i++) {
-    int idx = (syslogQueueHead + i) % SYSLOG_QUEUE_LEN;
-    sendSyslogPacket(
-      syslogQueue[idx].pri,
-      syslogQueue[idx].func,
-      syslogQueue[idx].msg
-    );
-    delay(5);   // brief gap to avoid flooding the syslog server
-  }
-
-  syslogQueueHead = 0;
-  syslogQueueLen  = 0;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -375,8 +272,6 @@ void syslogFlush() {
   syslogReady = true;
 }
 
-// logf() is a macro so __func__ resolves to the calling function name.
-// The internal _logf() carries it through to the syslog packet.
 void _logf(const char* func, const char* fmt, ...) {
   char line[512];
   va_list args;
@@ -399,8 +294,6 @@ void _logf(const char* func, const char* fmt, ...) {
     syslogTotal++;
   }
 }
-
-#define logf(fmt, ...) _logf(__func__, fmt, ##__VA_ARGS__)
 
 // ═══════════════════════════════════════════════════════════
 //  CAPTIVE PORTAL HTML
@@ -1168,14 +1061,6 @@ void setup() {
     startConfigPortal();
     return;
   }
-  // ── WiFi is up — initialise UDP then flush queued syslog messages ──
-  if (strlen(cfg.syslogServer)) {
-    udpSyslog.begin(0);   // bind to any local port for sending
-  }
-  // ── WiFi is up — flush queued syslog messages then mark ready ──
-  flushSyslogQueue();
-  syslogReady = true;
-
   // ── NTP sync (10s timeout) ───────────────────────────────
   syncNTP();
 
