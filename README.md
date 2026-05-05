@@ -221,7 +221,7 @@ On each wake the sensor checks GitHub Releases for a newer firmware version and 
 1. Bump `FIRMWARE_VERSION` in the sketch
 2. In Arduino IDE go to **Sketch → Export Compiled Binary** — find the `.bin` file in your sketch folder
 3. Create a plain text file `version.txt` containing just the new version number (e.g. `2.1.0`) with no trailing whitespace
-4. Create a new GitHub release tagged `vX.X.X`, attach both `firmware.bin` and `version.txt` as release assets
+4. Create a new GitHub release tagged `vX.X.X`, attach both `moisture-sensor-esp32.ino.bin` and `version.txt` as release assets
 5. Every sensor will pick up the update automatically on its next wake cycle
 
 The `fw` field in the MQTT payload confirms the running firmware version. If an update fails the sensor continues operating on the existing firmware and retries on the next wake.

@@ -6,6 +6,7 @@
 #include <PubSubClient.h>
 #include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
+#include <WiFiUdp.h>
 #include <time.h>
 #include "esp_mac.h"
 
@@ -69,11 +70,36 @@ const long  GMT_OFFSET_S = 0;
 const int   DST_OFFSET_S = 0;
 
 // ── FOTA ─────────────────────────────────────────────────
-const char* FOTA_VERSION_URL = "https://github.com/mcleancraig/moisture-sensor-esp32/releases/latest/download/version.txt";
-const char* FOTA_BIN_URL     = "https://github.com/mcleancraig/moisture-sensor-esp32/releases/latest/download/moisture-sensor-esp32.ino.bin";
+const char* FOTA_VERSION_URL =
+  "https://github.com/mcleancraig/moisture-sensor-esp32"
+  "/releases/latest/download/version.txt";
+const char* FOTA_BIN_URL =
+  "https://github.com/mcleancraig/moisture-sensor-esp32"
+  "/releases/latest/download/moisture-sensor-esp32.ino.bin";
 
 // ── HA discovery prefix ───────────────────────────────────
 const char* HA_DISCOVERY_PREFIX = "homeassistant";
+
+// ── Syslog ───────────────────────────────────────────────
+// RFC 3164 facility 1 (user) + severity 6 (info)  = priority 14
+// RFC 3164 facility 1 (user) + severity 3 (error) = priority 11
+#define SYSLOG_PRI_INFO  14
+#define SYSLOG_PRI_ERR   11
+#define SYSLOG_MAX_MSG   128
+#define SYSLOG_QUEUE_LEN 20
+
+WiFiUDP udpSyslog;
+bool    syslogReady = false;   // true once WiFi is up and syslog configured
+
+// Pre-WiFi queue — stores messages until WiFi connects
+struct SyslogEntry {
+  int  pri;
+  char func[32];
+  char msg[SYSLOG_MAX_MSG];
+};
+SyslogEntry syslogQueue[SYSLOG_QUEUE_LEN];
+int syslogQueueHead = 0;
+int syslogQueueLen  = 0;
 
 // ═══════════════════════════════════════════════════════════
 //  RUNTIME CONFIG — loaded from NVS
@@ -169,6 +195,91 @@ void saveConfig(const Config& c) {
   prefs.putInt("syslogPort",    c.syslogPort);
   prefs.end();
   logf("Config    — saved to NVS\n");
+}
+
+// ═══════════════════════════════════════════════════════════
+//  LOGGING — serial + syslog with pre-WiFi queue
+// ═══════════════════════════════════════════════════════════
+
+void sendSyslogPacket(int pri, const char* func, const char* msg) {
+  char packet[192];
+  time_t now = time(nullptr);
+  struct tm* t = gmtime(&now);
+  char ts[20];
+  strftime(ts, sizeof(ts), "%b %d %H:%M:%S", t);
+
+  // Build hostname from sensor number — works before buildDerivedConfig()
+  // and produces the same value as SENSOR_ID once it is built
+  char hostname[16];
+  if (cfg.sensorNumber > 0) {
+    snprintf(hostname, sizeof(hostname), "sensor%d", cfg.sensorNumber);
+  } else {
+    strncpy(hostname, "sensor?", sizeof(hostname));
+  }
+
+  snprintf(packet, sizeof(packet), "<%d>%s %s %s: %s",
+    pri, ts, hostname, func, msg);
+
+  udpSyslog.beginPacket(cfg.syslogServer, cfg.syslogPort);
+  udpSyslog.write((const uint8_t*)packet, strlen(packet));
+  udpSyslog.endPacket();
+}
+
+void logMessage(int pri, const char* func, const char* fmt, ...) {
+  char msg[SYSLOG_MAX_MSG];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, args);
+  va_end(args);
+
+  // Always write to serial
+  Serial.printf("[%s] %s\n", func, msg);
+
+  // Syslog path
+  if (!strlen(cfg.syslogServer)) return;   // syslog not configured
+
+  if (syslogReady) {
+    // WiFi is up — send immediately
+    sendSyslogPacket(pri, func, msg);
+  } else {
+    // WiFi not yet up — enqueue for later
+    if (syslogQueueLen < SYSLOG_QUEUE_LEN) {
+      int idx = (syslogQueueHead + syslogQueueLen) % SYSLOG_QUEUE_LEN;
+      syslogQueue[idx].pri = pri;
+      strncpy(syslogQueue[idx].func, func, sizeof(syslogQueue[idx].func) - 1);
+      strncpy(syslogQueue[idx].msg,  msg,  sizeof(syslogQueue[idx].msg)  - 1);
+      syslogQueueLen++;
+    }
+    // Queue full — drop silently rather than crash
+  }
+}
+
+// Convenience macro — captures function name automatically
+#define LOG(fmt, ...)     logMessage(SYSLOG_PRI_INFO, __func__, fmt, ##__VA_ARGS__)
+#define LOG_ERR(fmt, ...) logMessage(SYSLOG_PRI_ERR,  __func__, fmt, ##__VA_ARGS__)
+
+
+void flushSyslogQueue() {
+  if (!strlen(cfg.syslogServer)) return;
+  if (syslogQueueLen == 0) return;
+
+  syslogReady = true;   // mark ready before flush so sendSyslogPacket works
+
+  Serial.printf("[flushSyslogQueue] flushing %d queued messages to syslog\n",
+    syslogQueueLen);
+
+  for (int i = 0; i < syslogQueueLen; i++) {
+    int idx = (syslogQueueHead + i) % SYSLOG_QUEUE_LEN;
+    sendSyslogPacket(
+      syslogQueue[idx].pri,
+      syslogQueue[idx].func,
+      syslogQueue[idx].msg
+    );
+    delay(5);   // brief gap to avoid flooding the syslog server
+  }
+
+  syslogQueueHead = 0;
+  syslogQueueLen  = 0;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -378,35 +489,35 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 
       <h3>Gateway (router)</h3>
       <div class="ip-wrap">
-        <input type="number" name="gw1" id="gw1" value="192" min="0" max="255">
+        <input type="number" name="gw1" value="192" min="0" max="255">
         <span>.</span>
-        <input type="number" name="gw2" id="gw2" value="168" min="0" max="255">
+        <input type="number" name="gw2" value="168" min="0" max="255">
         <span>.</span>
-        <input type="number" name="gw3" id="gw3" value="1" min="0" max="255">
+        <input type="number" name="gw3" value="1" min="0" max="255">
         <span>.</span>
-        <input type="number" name="gw4" id="gw4" value="1" min="0" max="255">
+        <input type="number" name="gw4" value="1" min="0" max="255">
       </div>
 
       <h3>Subnet mask</h3>
       <div class="ip-wrap">
-        <input type="number" name="sn1" id="sn1" value="255" min="0" max="255">
+        <input type="number" name="sn1" value="255" min="0" max="255">
         <span>.</span>
-        <input type="number" name="sn2" id="sn2" value="255" min="0" max="255">
+        <input type="number" name="sn2" value="255" min="0" max="255">
         <span>.</span>
-        <input type="number" name="sn3" id="sn3" value="0" min="0" max="255">
+        <input type="number" name="sn3" value="0" min="0" max="255">
         <span>.</span>
-        <input type="number" name="sn4" id="sn4" value="0" min="0" max="255">
+        <input type="number" name="sn4" value="0" min="0" max="255">
       </div>
 
       <h3>DNS server</h3>
       <div class="ip-wrap">
-        <input type="number" name="dns1" id="dns1" value="192" min="0" max="255">
+        <input type="number" name="dns1" value="192" min="0" max="255">
         <span>.</span>
-        <input type="number" name="dns2" id="dns2" value="168" min="0" max="255">
+        <input type="number" name="dns2" value="168" min="0" max="255">
         <span>.</span>
-        <input type="number" name="dns3" id="dns3" value="1" min="0" max="255">
+        <input type="number" name="dns3" value="1" min="0" max="255">
         <span>.</span>
-        <input type="number" name="dns4" id="dns4" value="1" min="0" max="255">
+        <input type="number" name="dns4" value="1" min="0" max="255">
       </div>
     </div>
   </div>
@@ -440,6 +551,9 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
     <label>Syslog port
       <input type="number" name="syslogPort" value="514">
     </label>
+    <p class="hint">UDP syslog (RFC 3164). All log output is mirrored here.
+      Compatible with rsyslog, syslog-ng, Graylog, and the Home Assistant
+      Syslog add-on.</p>
   </div>
 
   <button type="submit">Save &amp; Restart</button>
@@ -457,7 +571,9 @@ function togglePw(btn) {
 }
 function syncNet() {
   var n = document.getElementById('sensorNum').value;
-  document.getElementById('ip4').value = n;
+  if (document.getElementById('staticChk').checked) {
+    document.getElementById('ip4').value = n;
+  }
 }
 function toggleNet(cb) {
   document.getElementById('network-rows').style.display =
@@ -611,7 +727,8 @@ void startConfigPortal() {
   server.onNotFound(handleNotFound);
   server.begin();
 
-  unsigned long deadline = millis() + (unsigned long)AP_TIMEOUT_MIN * 60 * 1000UL;
+  unsigned long deadline =
+    millis() + (unsigned long)AP_TIMEOUT_MIN * 60 * 1000UL;
 
   while (millis() < deadline) {
     dnsServer.processNextRequest();
@@ -628,9 +745,8 @@ void startConfigPortal() {
   esp_deep_sleep_start();
 }
 
-
 // ═══════════════════════════════════════════════════════════
-//  FOTA (automatic update from GitHub Releases)
+//  FOTA
 // ═══════════════════════════════════════════════════════════
 
 void checkForUpdate() {
@@ -642,7 +758,7 @@ void checkForUpdate() {
   logf("FOTA      — checking for update...\n");
 
   WiFiClientSecure client;
-  client.setInsecure();   // skip cert validation — acceptable for own repo
+  client.setInsecure();
 
   HTTPClient http;
   http.begin(client, FOTA_VERSION_URL);
@@ -694,8 +810,7 @@ void checkForUpdate() {
       logf("FOTA      — no update\n");
       break;
     case HTTP_UPDATE_OK:
-      // HTTPUpdate restarts automatically — this line is never reached
-      break;
+      break;   // restarts automatically
   }
 }
 
@@ -803,8 +918,10 @@ float readBatteryVoltage(int &rawMv) {
 }
 
 int batteryPercent(float voltage) {
-  const float v[] = { 3.00, 3.10, 3.25, 3.50, 3.60, 3.70, 3.80, 3.90, 4.00, 4.10, 4.20 };
-  const int   p[] = {    0,    5,   10,   20,   35,   50,   65,   80,   90,   95,  100 };
+  const float v[] = { 3.00, 3.10, 3.25, 3.50, 3.60,
+                      3.70, 3.80, 3.90, 4.00, 4.10, 4.20 };
+  const int   p[] = {    0,    5,   10,   20,   35,
+                        50,   65,   80,   90,   95,  100 };
   const int   n   = sizeof(v) / sizeof(v[0]);
 
   if (voltage <= v[0])   return 0;
@@ -876,7 +993,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   cmdReceived = true;
   logf("Command   — received: %s\n", cmdPayload);
 
-  // Clear retained message immediately so it only fires once
+  // Clear retained message immediately
   mqtt.publish(CMD_TOPIC, "", true);
   mqtt.loop();
 }
@@ -1003,6 +1120,9 @@ void setup() {
   logf(  "║   Firmware v%-12s ║\n", FIRMWARE_VERSION);
   logf(  "╚══════════════════════════╝\n");
 
+  // ── Load config first so syslog server address is available ──
+  loadConfig();
+
   // ── Reed switch check ─────────────────────────────────────
   checkReedSwitch();
 
@@ -1024,9 +1144,6 @@ void setup() {
     }
     logf("Config    — button released early, continuing normal boot\n");
   }
-
-  // ── Load config ───────────────────────────────────────────
-  loadConfig();
 
   if (!configLoaded) {
     logf("Config    — none found, starting portal\n");
@@ -1051,6 +1168,13 @@ void setup() {
     startConfigPortal();
     return;
   }
+  // ── WiFi is up — initialise UDP then flush queued syslog messages ──
+  if (strlen(cfg.syslogServer)) {
+    udpSyslog.begin(0);   // bind to any local port for sending
+  }
+  // ── WiFi is up — flush queued syslog messages then mark ready ──
+  flushSyslogQueue();
+  syslogReady = true;
 
   // ── NTP sync (10s timeout) ───────────────────────────────
   syncNTP();
@@ -1099,7 +1223,6 @@ void setup() {
       delay(10);
     }
 
-    // Act on any command received — restart/reset will not return
     processMqttCommand();
   }
 
