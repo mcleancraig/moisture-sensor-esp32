@@ -6,6 +6,10 @@ Items identified during v2 development for future releases.
 
 - [ ] **Per-device AP password** — derive the portal password from the last 3 bytes of the device MAC address instead of the shared `moisture` string. Print the password on a label affixed to the enclosure so each unit has a unique credential without any configuration overhead.
 
+- [ ] **FOTA TLS certificate validation** — `checkForUpdate()` currently uses `client.setInsecure()`, which skips certificate verification. An MITM on the network path between the sensor and GitHub could serve a malicious firmware binary that the device would flash without question. Fix: embed the ISRG Root X1 CA certificate (~1.5 KB of flash) and call `client.setCACert(rootCA)` instead. This secures the entire download path without requiring manual cert rotation.
+
+- [ ] **FOTA firmware integrity check** — even with TLS validation, publishing a SHA-256 hash of `firmware.bin` as a third release asset and verifying it before flashing would provide defence-in-depth against a compromised GitHub account or release. Requires downloading the binary manually rather than via `httpUpdate`, then verifying the hash before calling `Update.begin()`.
+
 - [ ] **P-channel MOSFET reverse polarity protection** — replace the removed 1N5819 diode with a P-channel MOSFET (e.g. AO3401) wired as a reverse polarity switch. Unlike the diode this has near-zero voltage drop and allows bidirectional current, meaning charging works correctly while still protecting against reversed battery insertion. The 1N5819 diode blocked charging current and has been removed from the design pending this fix.
 
 ## Maintainability

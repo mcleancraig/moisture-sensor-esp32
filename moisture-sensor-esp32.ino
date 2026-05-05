@@ -9,20 +9,29 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.2.0
+//  - saveConfig() takes Config struct (was 24 params)
+//  - IP addresses stored as 4-byte NVS blocks (auto-migrates old per-octet keys)
+//  - configLoaded now requires MQTT broker to be set
+//  - Server-side validation in handleSave()
+//  - handleNotFound() uses softAPIP() instead of hardcoded 192.168.4.1
+//  - readMoisture() returns MoistureReading struct (was raw mV only)
+//  - mqtt.disconnect() before deep sleep
+//  - MQTT buffer size increased to 768
+//
 //  v2.1.0
 //  - Captive portal config on first boot
 //  - Boot button hold to reconfigure without reflashing
 //  - Reed switch hold to restart (external, no enclosure access needed)
 //  - MQTT retained command: reset / restart (self-clearing)
 //  - FOTA: automatic firmware update from GitHub Releases
-//  - OTA: IDE-based update over WiFi (fallback for development)
 //  - Firmware version in MQTT payload
 //  - NTP timestamp in MQTT payload (10s timeout)
 //  - Gateway, netmask and DNS configurable via portal
 //  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
 
-#define FIRMWARE_VERSION "2.1.0"
+#define FIRMWARE_VERSION "2.2.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -83,6 +92,11 @@ struct Config {
   char    mqttPassword[64];
 } cfg;
 
+struct MoistureReading {
+  int rawMv;
+  int percent;
+};
+
 bool configLoaded = false;
 
 void loadConfig() {
@@ -91,29 +105,33 @@ void loadConfig() {
   prefs.getString("wifiSSID",   cfg.wifiSSID,    sizeof(cfg.wifiSSID));
   prefs.getString("wifiPass",   cfg.wifiPassword,sizeof(cfg.wifiPassword));
   cfg.staticIP  = prefs.getBool("staticIP", false);
-  cfg.ip[0]  = prefs.getUChar("ip0",  192);
-  cfg.ip[1]  = prefs.getUChar("ip1",  168);
-  cfg.ip[2]  = prefs.getUChar("ip2",  220);
-  cfg.ip[3]  = prefs.getUChar("ip3",    1);
-  cfg.gw[0]  = prefs.getUChar("gw0",  192);
-  cfg.gw[1]  = prefs.getUChar("gw1",  168);
-  cfg.gw[2]  = prefs.getUChar("gw2",    1);
-  cfg.gw[3]  = prefs.getUChar("gw3",    1);
-  cfg.sn[0]  = prefs.getUChar("sn0",  255);
-  cfg.sn[1]  = prefs.getUChar("sn1",  255);
-  cfg.sn[2]  = prefs.getUChar("sn2",    0);
-  cfg.sn[3]  = prefs.getUChar("sn3",    0);
-  cfg.dns[0] = prefs.getUChar("dns0", 192);
-  cfg.dns[1] = prefs.getUChar("dns1", 168);
-  cfg.dns[2] = prefs.getUChar("dns2",   1);
-  cfg.dns[3] = prefs.getUChar("dns3",   1);
+
+  // IP addresses — new format uses 4-byte blocks; fall back to old per-octet keys
+  // if not present (sensors upgrading from v2.1.0 auto-migrate on next save)
+  if (prefs.getBytes("ip",  cfg.ip,  4) == 0) {
+    cfg.ip[0] = prefs.getUChar("ip0", 192); cfg.ip[1] = prefs.getUChar("ip1", 168);
+    cfg.ip[2] = prefs.getUChar("ip2", 220); cfg.ip[3] = prefs.getUChar("ip3",   1);
+  }
+  if (prefs.getBytes("gw",  cfg.gw,  4) == 0) {
+    cfg.gw[0] = prefs.getUChar("gw0", 192); cfg.gw[1] = prefs.getUChar("gw1", 168);
+    cfg.gw[2] = prefs.getUChar("gw2",   1); cfg.gw[3] = prefs.getUChar("gw3",   1);
+  }
+  if (prefs.getBytes("sn",  cfg.sn,  4) == 0) {
+    cfg.sn[0] = prefs.getUChar("sn0", 255); cfg.sn[1] = prefs.getUChar("sn1", 255);
+    cfg.sn[2] = prefs.getUChar("sn2",   0); cfg.sn[3] = prefs.getUChar("sn3",   0);
+  }
+  if (prefs.getBytes("dns", cfg.dns, 4) == 0) {
+    cfg.dns[0] = prefs.getUChar("dns0", 192); cfg.dns[1] = prefs.getUChar("dns1", 168);
+    cfg.dns[2] = prefs.getUChar("dns2",   1); cfg.dns[3] = prefs.getUChar("dns3",   1);
+  }
+
   prefs.getString("mqttBroker", cfg.mqttBroker,  sizeof(cfg.mqttBroker));
   cfg.mqttPort  = prefs.getInt("mqttPort", 1883);
   prefs.getString("mqttUser",   cfg.mqttUser,    sizeof(cfg.mqttUser));
   prefs.getString("mqttPass",   cfg.mqttPassword,sizeof(cfg.mqttPassword));
   prefs.end();
 
-  configLoaded = (cfg.sensorNumber > 0 && strlen(cfg.wifiSSID) > 0);
+  configLoaded = (cfg.sensorNumber > 0 && strlen(cfg.wifiSSID) > 0 && strlen(cfg.mqttBroker) > 0);
 }
 
 void clearConfig() {
@@ -123,32 +141,20 @@ void clearConfig() {
   Serial.println("Config    — NVS cleared");
 }
 
-void saveConfig(int sensorNum,
-                const char* ssid, const char* wifiPass,
-                bool staticIp,
-                uint8_t ip0,  uint8_t ip1,  uint8_t ip2,  uint8_t ip3,
-                uint8_t gw0,  uint8_t gw1,  uint8_t gw2,  uint8_t gw3,
-                uint8_t sn0,  uint8_t sn1,  uint8_t sn2,  uint8_t sn3,
-                uint8_t dns0, uint8_t dns1, uint8_t dns2, uint8_t dns3,
-                const char* broker, int port,
-                const char* user, const char* mqttPass) {
+void saveConfig(const Config& c) {
   prefs.begin("sensor", false);
-  prefs.putInt("sensorNum",  sensorNum);
-  prefs.putString("wifiSSID",  ssid);
-  prefs.putString("wifiPass",  wifiPass);
-  prefs.putBool("staticIP",    staticIp);
-  prefs.putUChar("ip0",  ip0);  prefs.putUChar("ip1",  ip1);
-  prefs.putUChar("ip2",  ip2);  prefs.putUChar("ip3",  ip3);
-  prefs.putUChar("gw0",  gw0);  prefs.putUChar("gw1",  gw1);
-  prefs.putUChar("gw2",  gw2);  prefs.putUChar("gw3",  gw3);
-  prefs.putUChar("sn0",  sn0);  prefs.putUChar("sn1",  sn1);
-  prefs.putUChar("sn2",  sn2);  prefs.putUChar("sn3",  sn3);
-  prefs.putUChar("dns0", dns0); prefs.putUChar("dns1", dns1);
-  prefs.putUChar("dns2", dns2); prefs.putUChar("dns3", dns3);
-  prefs.putString("mqttBroker", broker);
-  prefs.putInt("mqttPort",     port);
-  prefs.putString("mqttUser",  user);
-  prefs.putString("mqttPass",  mqttPass);
+  prefs.putInt("sensorNum",     c.sensorNumber);
+  prefs.putString("wifiSSID",   c.wifiSSID);
+  prefs.putString("wifiPass",   c.wifiPassword);
+  prefs.putBool("staticIP",     c.staticIP);
+  prefs.putBytes("ip",  c.ip,  4);
+  prefs.putBytes("gw",  c.gw,  4);
+  prefs.putBytes("sn",  c.sn,  4);
+  prefs.putBytes("dns", c.dns, 4);
+  prefs.putString("mqttBroker", c.mqttBroker);
+  prefs.putInt("mqttPort",      c.mqttPort);
+  prefs.putString("mqttUser",   c.mqttUser);
+  prefs.putString("mqttPass",   c.mqttPassword);
   prefs.end();
   Serial.println("Config    — saved to NVS");
 }
@@ -347,6 +353,26 @@ const char SAVED_HTML[] PROGMEM = R"rawhtml(
 </html>
 )rawhtml";
 
+const char ERROR_HTML[] PROGMEM = R"rawhtml(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Invalid input</title>
+<style>
+  body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:0 16px;
+    text-align:center;background:#f5f5f5}
+  h1{color:#c0392b}p{color:#555}a{color:#2c7a4b}
+</style>
+</head>
+<body>
+<h1>Invalid input</h1>
+<p>Sensor number must be 1–254. WiFi SSID and MQTT broker address are required.</p>
+<p><a href="/">Go back</a></p>
+</body>
+</html>
+)rawhtml";
+
 // ═══════════════════════════════════════════════════════════
 //  PORTAL HANDLERS
 // ═══════════════════════════════════════════════════════════
@@ -356,42 +382,44 @@ void handleRoot() {
 }
 
 void handleSave() {
-  int  sensorNum = server.arg("sensorNum").toInt();
-  bool staticIp  = server.hasArg("staticIP");
-  int  port      = server.arg("mqttPort").toInt();
-  if (port == 0) port = 1883;
+  int sensorNum = server.arg("sensorNum").toInt();
 
-  uint8_t ip0  = staticIp ? server.arg("ip1").toInt()  : 192;
-  uint8_t ip1  = staticIp ? server.arg("ip2").toInt()  : 168;
-  uint8_t ip2  = staticIp ? server.arg("ip3").toInt()  : 220;
-  uint8_t ip3  = staticIp ? server.arg("ip4").toInt()  : (uint8_t)sensorNum;
-  uint8_t gw0  = staticIp ? server.arg("gw1").toInt()  : 192;
-  uint8_t gw1  = staticIp ? server.arg("gw2").toInt()  : 168;
-  uint8_t gw2  = staticIp ? server.arg("gw3").toInt()  : 1;
-  uint8_t gw3  = staticIp ? server.arg("gw4").toInt()  : 1;
-  uint8_t sn0  = staticIp ? server.arg("sn1").toInt()  : 255;
-  uint8_t sn1  = staticIp ? server.arg("sn2").toInt()  : 255;
-  uint8_t sn2  = staticIp ? server.arg("sn3").toInt()  : 0;
-  uint8_t sn3  = staticIp ? server.arg("sn4").toInt()  : 0;
-  uint8_t dns0 = staticIp ? server.arg("dns1").toInt() : 192;
-  uint8_t dns1 = staticIp ? server.arg("dns2").toInt() : 168;
-  uint8_t dns2 = staticIp ? server.arg("dns3").toInt() : 1;
-  uint8_t dns3 = staticIp ? server.arg("dns4").toInt() : 1;
+  if (sensorNum < 1 || sensorNum > 254 ||
+      server.arg("ssid").length() == 0 ||
+      server.arg("mqttBroker").length() == 0) {
+    server.send_P(400, "text/html", ERROR_HTML);
+    return;
+  }
 
-  saveConfig(
-    sensorNum,
-    server.arg("ssid").c_str(),
-    server.arg("wifiPass").c_str(),
-    staticIp,
-    ip0, ip1, ip2, ip3,
-    gw0, gw1, gw2, gw3,
-    sn0, sn1, sn2, sn3,
-    dns0, dns1, dns2, dns3,
-    server.arg("mqttBroker").c_str(),
-    port,
-    server.arg("mqttUser").c_str(),
-    server.arg("mqttPass").c_str()
-  );
+  Config c = {};
+  c.sensorNumber = sensorNum;
+  strlcpy(c.wifiSSID,    server.arg("ssid").c_str(),       sizeof(c.wifiSSID));
+  strlcpy(c.wifiPassword,server.arg("wifiPass").c_str(),   sizeof(c.wifiPassword));
+  c.staticIP = server.hasArg("staticIP");
+
+  if (c.staticIP) {
+    c.ip[0]  = server.arg("ip1").toInt();  c.ip[1]  = server.arg("ip2").toInt();
+    c.ip[2]  = server.arg("ip3").toInt();  c.ip[3]  = server.arg("ip4").toInt();
+    c.gw[0]  = server.arg("gw1").toInt();  c.gw[1]  = server.arg("gw2").toInt();
+    c.gw[2]  = server.arg("gw3").toInt();  c.gw[3]  = server.arg("gw4").toInt();
+    c.sn[0]  = server.arg("sn1").toInt();  c.sn[1]  = server.arg("sn2").toInt();
+    c.sn[2]  = server.arg("sn3").toInt();  c.sn[3]  = server.arg("sn4").toInt();
+    c.dns[0] = server.arg("dns1").toInt(); c.dns[1] = server.arg("dns2").toInt();
+    c.dns[2] = server.arg("dns3").toInt(); c.dns[3] = server.arg("dns4").toInt();
+  } else {
+    c.ip[0]  = 192; c.ip[1]  = 168; c.ip[2]  = 220; c.ip[3]  = (uint8_t)sensorNum;
+    c.gw[0]  = 192; c.gw[1]  = 168; c.gw[2]  =   1; c.gw[3]  =   1;
+    c.sn[0]  = 255; c.sn[1]  = 255; c.sn[2]  =   0; c.sn[3]  =   0;
+    c.dns[0] = 192; c.dns[1] = 168; c.dns[2] =   1; c.dns[3] =   1;
+  }
+
+  strlcpy(c.mqttBroker,  server.arg("mqttBroker").c_str(), sizeof(c.mqttBroker));
+  c.mqttPort = server.arg("mqttPort").toInt();
+  if (c.mqttPort == 0) c.mqttPort = 1883;
+  strlcpy(c.mqttUser,    server.arg("mqttUser").c_str(),   sizeof(c.mqttUser));
+  strlcpy(c.mqttPassword,server.arg("mqttPass").c_str(),   sizeof(c.mqttPassword));
+
+  saveConfig(c);
 
   server.send_P(200, "text/html", SAVED_HTML);
   delay(1500);
@@ -399,7 +427,8 @@ void handleSave() {
 }
 
 void handleNotFound() {
-  server.sendHeader("Location", "http://192.168.4.1/", true);
+  String location = "http://" + WiFi.softAPIP().toString() + "/";
+  server.sendHeader("Location", location, true);
   server.send(302, "text/plain", "");
 }
 
@@ -579,13 +608,14 @@ void checkReedSwitch() {
 // ═══════════════════════════════════════════════════════════
 
 void goToSleep() {
+  if (mqtt.connected()) mqtt.disconnect();
   Serial.printf("Sleep     — going to sleep for %d minutes\n", SLEEP_MINUTES);
   Serial.flush();
   esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60 * 1000000ULL);
   esp_deep_sleep_start();
 }
 
-int readMoisture() {
+MoistureReading readMoisture() {
   analogSetPinAttenuation(MOISTURE_PIN, ADC_11db);
   delay(500);
   long sum = 0;
@@ -593,11 +623,11 @@ int readMoisture() {
     sum += analogReadMilliVolts(MOISTURE_PIN);
     delay(10);
   }
-  int avgMv = sum / 10;
-  int percent = map(avgMv, DRY_MV, WET_MV, 0, 100);
-  percent = constrain(percent, 0, 100);
-  Serial.printf("Moisture  — raw: %dmV  →  %d%%\n", avgMv, percent);
-  return avgMv;
+  MoistureReading r;
+  r.rawMv   = sum / 10;
+  r.percent = constrain(map(r.rawMv, DRY_MV, WET_MV, 0, 100), 0, 100);
+  Serial.printf("Moisture  — raw: %dmV  →  %d%%\n", r.rawMv, r.percent);
+  return r;
 }
 
 float readBatteryVoltage(int &rawMv) {
@@ -699,7 +729,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 void connectMqtt() {
   mqtt.setServer(cfg.mqttBroker, cfg.mqttPort);
-  mqtt.setBufferSize(512);
+  mqtt.setBufferSize(768);
   mqtt.setCallback(mqttCallback);
   String clientId = String("garden-") + SENSOR_ID;
   Serial.printf("MQTT      — connecting to %s as %s\n",
@@ -855,9 +885,7 @@ void setup() {
     cfg.sensorNumber, cfg.wifiSSID, cfg.mqttBroker);
 
   // ── Read sensors before WiFi — radio noise affects ADC ───
-  int   moistureRawMv = readMoisture();
-  int   moisturePct   = map(moistureRawMv, DRY_MV, WET_MV, 0, 100);
-  moisturePct         = constrain(moisturePct, 0, 100);
+  MoistureReading moisture = readMoisture();
 
   int   batRawMv = 0;
   float batV     = readBatteryVoltage(batRawMv);
@@ -893,7 +921,7 @@ void setup() {
         "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
         "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":%.2f,"
         "\"battery_pct\":%d,\"battery_raw_mv\":%d,\"fw\":\"%s\",\"ts\":\"%s\"}",
-        SENSOR_ID, moisturePct, moistureRawMv,
+        SENSOR_ID, moisture.percent, moisture.rawMv,
         DRY_MV, WET_MV, batV, batPct, batRawMv,
         FIRMWARE_VERSION, timestamp);
     } else {
@@ -901,7 +929,7 @@ void setup() {
         "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
         "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":null,"
         "\"battery_pct\":null,\"battery_raw_mv\":%d,\"fw\":\"%s\",\"ts\":\"%s\"}",
-        SENSOR_ID, moisturePct, moistureRawMv,
+        SENSOR_ID, moisture.percent, moisture.rawMv,
         DRY_MV, WET_MV, batRawMv,
         FIRMWARE_VERSION, timestamp);
     }
