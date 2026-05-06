@@ -276,16 +276,21 @@ void syslogSend(const char* func, const char* msg) {
 void syslogFlush() {
   if (strlen(cfg.syslogHost) == 0) { syslogReady = true; return; }
 
-  // Resolve hostname → IP once, with a 3 s timeout.
-  // If the host is already a numeric IP, hostByName() returns immediately.
-  // On failure syslog is silently disabled for this wake cycle — nothing else blocks.
-  if (WiFi.hostByName(cfg.syslogHost, syslogIP, 3000) != 1) {
-    Serial.printf("[syslogFlush] DNS failed for '%s' — syslog disabled this cycle\n",
-      cfg.syslogHost);
-    syslogReady = true;   // prevent the buffer loop in _logf() from queueing further
-    syslogHead  = 0;
-    syslogTotal = 0;
-    return;
+  // Resolve syslog host → IP once per cycle so syslogSend() can use
+  // beginPacket(IPAddress) — which never blocks — instead of beginPacket(hostname).
+  //
+  // Try numeric IP first (instant, no DNS).  Fall back to hostByName() only if
+  // needed; lwIP's internal DNS timeout is ~4 s so this blocks at most once per
+  // wake cycle rather than on every log call.
+  if (!syslogIP.fromString(cfg.syslogHost)) {
+    if (WiFi.hostByName(cfg.syslogHost, syslogIP) != 1) {
+      Serial.printf("[syslogFlush] DNS failed for '%s' — syslog disabled this cycle\n",
+        cfg.syslogHost);
+      syslogReady = true;   // prevent _logf() from continuing to queue messages
+      syslogHead  = 0;
+      syslogTotal = 0;
+      return;
+    }
   }
 
   int count = min(syslogTotal, SYSLOG_LINES);
