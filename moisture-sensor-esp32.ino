@@ -217,8 +217,8 @@ char DISC_BAT_PCT[128];
 char DISC_TS[128];
 char DISC_BTN_RESTART[128];
 char DISC_BTN_RESET[128];
-char CONFIG_SET_TOPIC[80];
-char CONFIG_STATE_TOPIC[80];
+char CONFIG_SET_PREFIX[80];   // garden/sensorN/config/set  (subscribe as .../+)
+char CONFIG_STATE_TOPIC[80];  // garden/sensorN/config/state
 char DISC_CFG_MQTT_BROKER[128];
 char DISC_CFG_MQTT_PORT[128];
 char DISC_CFG_MQTT_USER[128];
@@ -243,7 +243,7 @@ void buildDerivedConfig() {
     "%s/button/%s_restart/config",         HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BTN_RESET, sizeof(DISC_BTN_RESET),
     "%s/button/%s_reset/config",             HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(CONFIG_SET_TOPIC,   sizeof(CONFIG_SET_TOPIC),   "garden/%s/config/set",    SENSOR_ID);
+  snprintf(CONFIG_SET_PREFIX,  sizeof(CONFIG_SET_PREFIX),  "garden/%s/config/set",    SENSOR_ID);
   snprintf(CONFIG_STATE_TOPIC, sizeof(CONFIG_STATE_TOPIC), "garden/%s/config/state",  SENSOR_ID);
   snprintf(DISC_CFG_MQTT_BROKER, sizeof(DISC_CFG_MQTT_BROKER),
     "%s/text/%s_cfg_mqtt_broker/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
@@ -1161,8 +1161,7 @@ PubSubClient mqtt(wifiClient);
 
 bool cmdReceived       = false;
 char cmdPayload[32]    = "";
-bool configMsgReceived = false;
-char configMsgPayload[256] = "";
+bool configChanged = false;   // set in mqttCallback when any config/set/+ field is applied
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (length == 0) return;
@@ -1176,14 +1175,73 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     mqtt.publish(CMD_TOPIC, "", true);   // clear retained
     mqtt.loop();
 
-  } else if (strcmp(topic, CONFIG_SET_TOPIC) == 0) {
-    if (length >= sizeof(configMsgPayload)) return;
-    memcpy(configMsgPayload, payload, length);
-    configMsgPayload[length] = '\0';
-    configMsgReceived = true;
-    logf("Config    — update received on %s\n", topic);
-    mqtt.publish(CONFIG_SET_TOPIC, "", true);  // clear retained
-    mqtt.loop();
+  } else {
+    // Check for config/set/+ wildcard topics
+    size_t prefixLen = strlen(CONFIG_SET_PREFIX);
+    if (strncmp(topic, CONFIG_SET_PREFIX, prefixLen) == 0 &&
+        topic[prefixLen] == '/') {
+      const char* field = topic + prefixLen + 1;
+
+      char val[128] = "";
+      if (length > 0 && length < sizeof(val)) {
+        memcpy(val, payload, length);
+        val[length] = '\0';
+      }
+
+      // Clear this field's retained slot immediately — before validation so a
+      // bad value doesn't keep re-firing on every wake until manually cleared.
+      mqtt.publish(topic, "", true);
+      mqtt.loop();
+
+      String v(val);
+      String err;
+
+      if (strcmp(field, "mqttBroker") == 0) {
+        err = validateHost(v, "MQTT broker");
+        if (err.length()) { logf("Config    — mqttBroker rejected: %s\n", err.c_str()); return; }
+        strlcpy(cfg.mqttBroker, val, sizeof(cfg.mqttBroker));
+        logf("Config    — mqttBroker -> %s\n", val);
+        configChanged = true;
+
+      } else if (strcmp(field, "mqttPort") == 0) {
+        int p = atoi(val);
+        if (p < 1 || p > 65535) { logf("Config    — mqttPort rejected: must be 1-65535\n"); return; }
+        cfg.mqttPort = p;
+        logf("Config    — mqttPort -> %d\n", p);
+        configChanged = true;
+
+      } else if (strcmp(field, "mqttUser") == 0) {
+        if (v.length() > 31)    { logf("Config    — mqttUser rejected: too long\n"); return; }
+        if (hasControlChars(v)) { logf("Config    — mqttUser rejected: control chars\n"); return; }
+        strlcpy(cfg.mqttUser, val, sizeof(cfg.mqttUser));
+        logf("Config    — mqttUser -> %s\n", val);
+        configChanged = true;
+
+      } else if (strcmp(field, "mqttPassword") == 0) {
+        if (v.length() > 63)    { logf("Config    — mqttPassword rejected: too long\n"); return; }
+        if (hasControlChars(v)) { logf("Config    — mqttPassword rejected: control chars\n"); return; }
+        strlcpy(cfg.mqttPassword, val, sizeof(cfg.mqttPassword));
+        logf("Config    — mqttPassword updated\n");  // value not logged
+        configChanged = true;
+
+      } else if (strcmp(field, "syslogHost") == 0) {
+        err = (v.length() > 0) ? validateHost(v, "Syslog host") : "";
+        if (err.length()) { logf("Config    — syslogHost rejected: %s\n", err.c_str()); return; }
+        strlcpy(cfg.syslogHost, val, sizeof(cfg.syslogHost));
+        logf("Config    — syslogHost -> '%s'\n", val);
+        configChanged = true;
+
+      } else if (strcmp(field, "syslogPort") == 0) {
+        int p = atoi(val);
+        if (p < 1 || p > 65535) { logf("Config    — syslogPort rejected: must be 1-65535\n"); return; }
+        cfg.syslogPort = p;
+        logf("Config    — syslogPort -> %d\n", p);
+        configChanged = true;
+
+      } else {
+        logf("Config    — unknown field: %s\n", field);
+      }
+    }
   }
 }
 
@@ -1204,9 +1262,11 @@ void connectMqtt() {
 
     if (ok) {
       logf("MQTT      — connected\n");
+      char configWildcard[88];
+      snprintf(configWildcard, sizeof(configWildcard), "%s/+", CONFIG_SET_PREFIX);
       mqtt.subscribe(CMD_TOPIC);
-      mqtt.subscribe(CONFIG_SET_TOPIC);
-      logf("MQTT      — subscribed to %s and %s\n", CMD_TOPIC, CONFIG_SET_TOPIC);
+      mqtt.subscribe(configWildcard);
+      logf("MQTT      — subscribed to %s and %s\n", CMD_TOPIC, configWildcard);
     } else {
       logf("MQTT      — failed (rc=%d), retrying\n", mqtt.state());
       delay(500);
@@ -1339,39 +1399,6 @@ void publishDiscovery() {
 //  Validation parity: same rules as the captive portal and validateSave().
 // ═══════════════════════════════════════════════════════════
 
-// ── Lightweight JSON field extractors ───────────────────────
-// These handle flat objects with simple string and integer values.
-// Strings with escaped quotes inside the value are not supported,
-// but all config fields are plain hostnames, addresses, or credentials.
-
-static bool jsonGetString(const char* json, const char* key,
-                          char* out, size_t maxLen) {
-  char search[48];
-  snprintf(search, sizeof(search), "\"%s\":", key);
-  const char* p = strstr(json, search);
-  if (!p) return false;
-  p += strlen(search);
-  while (*p == ' ') p++;
-  if (*p != '"') return false;
-  p++;
-  size_t i = 0;
-  while (*p && *p != '"' && i < maxLen - 1) out[i++] = *p++;
-  out[i] = '\0';
-  return (*p == '"');
-}
-
-static bool jsonGetInt(const char* json, const char* key, int& out) {
-  char search[48];
-  snprintf(search, sizeof(search), "\"%s\":", key);
-  const char* p = strstr(json, search);
-  if (!p) return false;
-  p += strlen(search);
-  while (*p == ' ') p++;
-  if (!isdigit((uint8_t)*p) && *p != '-') return false;
-  out = atoi(p);
-  return true;
-}
-
 // Publishes current configurable settings as a retained JSON object.
 // Called on every boot (so HA text/number entities reflect current state)
 // and again after applying a remote config change.
@@ -1391,105 +1418,18 @@ void publishConfigState() {
   logf("Config    — state published to %s\n", CONFIG_STATE_TOPIC);
 }
 
-// Applies a partial JSON config update received on CONFIG_SET_TOPIC.
-// Only present keys are updated; omitted keys are left unchanged.
-// Validation failures per-field are logged and skipped (other fields proceed).
-// Saves to NVS and restarts if any valid change was applied.
-void processConfigMessage() {
-  if (!configMsgReceived) return;
-  configMsgReceived = false;
-
-  bool changed = false;
-  char strVal[64];
-  int  intVal;
-  String err;
-
-  // ── mqttBroker ──────────────────────────────────────────
-  if (jsonGetString(configMsgPayload, "mqttBroker", strVal, sizeof(strVal))) {
-    err = validateHost(String(strVal), "MQTT broker");
-    if (err.length()) {
-      logf("Config    — mqttBroker rejected: %s\n", err.c_str());
-    } else {
-      strlcpy(cfg.mqttBroker, strVal, sizeof(cfg.mqttBroker));
-      logf("Config    — mqttBroker -> %s\n", strVal);
-      changed = true;
-    }
-  }
-
-  // ── mqttPort ────────────────────────────────────────────
-  if (jsonGetInt(configMsgPayload, "mqttPort", intVal)) {
-    if (intVal < 1 || intVal > 65535) {
-      logf("Config    — mqttPort rejected: must be 1-65535\n");
-    } else {
-      cfg.mqttPort = intVal;
-      logf("Config    — mqttPort -> %d\n", intVal);
-      changed = true;
-    }
-  }
-
-  // ── mqttUser ────────────────────────────────────────────
-  if (jsonGetString(configMsgPayload, "mqttUser", strVal, sizeof(strVal))) {
-    String s(strVal);
-    if (s.length() > 31) {
-      logf("Config    — mqttUser rejected: too long (max 31)\n");
-    } else if (hasControlChars(s)) {
-      logf("Config    — mqttUser rejected: contains control characters\n");
-    } else {
-      strlcpy(cfg.mqttUser, strVal, sizeof(cfg.mqttUser));
-      logf("Config    — mqttUser -> %s\n", strVal);
-      changed = true;
-    }
-  }
-
-  // ── mqttPassword ────────────────────────────────────────
-  if (jsonGetString(configMsgPayload, "mqttPassword", strVal, sizeof(strVal))) {
-    String s(strVal);
-    if (s.length() > 63) {
-      logf("Config    — mqttPassword rejected: too long (max 63)\n");
-    } else if (hasControlChars(s)) {
-      logf("Config    — mqttPassword rejected: contains control characters\n");
-    } else {
-      strlcpy(cfg.mqttPassword, strVal, sizeof(cfg.mqttPassword));
-      logf("Config    — mqttPassword updated\n");  // value not logged
-      changed = true;
-    }
-  }
-
-  // ── syslogHost ──────────────────────────────────────────
-  // Empty string is valid here — it disables syslog.
-  if (jsonGetString(configMsgPayload, "syslogHost", strVal, sizeof(strVal))) {
-    String s(strVal);
-    err = (s.length() > 0) ? validateHost(s, "Syslog host") : "";
-    if (err.length()) {
-      logf("Config    — syslogHost rejected: %s\n", err.c_str());
-    } else {
-      strlcpy(cfg.syslogHost, strVal, sizeof(cfg.syslogHost));
-      logf("Config    — syslogHost -> '%s'\n", strVal);
-      changed = true;
-    }
-  }
-
-  // ── syslogPort ──────────────────────────────────────────
-  if (jsonGetInt(configMsgPayload, "syslogPort", intVal)) {
-    if (intVal < 1 || intVal > 65535) {
-      logf("Config    — syslogPort rejected: must be 1-65535\n");
-    } else {
-      cfg.syslogPort = intVal;
-      logf("Config    — syslogPort -> %d\n", intVal);
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    saveConfig(cfg);
-    publishConfigState();   // update retained state before restarting
-    logf("Config    — changes applied, restarting\n");
-    Serial.flush();
-    delay(500);
-    ESP.restart();
-  } else {
-    logf("Config    — no valid changes in payload\n");
-  }
+// Called after the listen window. If any config/set/+ messages were received
+// and applied during mqttCallback, saves to NVS and restarts to pick up
+// the new settings. All validation and cfg mutation already happened in the
+// callback — this just commits and reboots.
+void applyConfigChange() {
+  if (!configChanged) return;
+  saveConfig(cfg);
+  publishConfigState();   // update retained state before restarting
+  logf("Config    — all changes saved, restarting\n");
+  Serial.flush();
+  delay(500);
+  ESP.restart();
 }
 
 // Publishes HA MQTT autodiscovery payloads for the 6 remote-configurable
@@ -1508,16 +1448,18 @@ void publishConfigDiscovery() {
 
   char payload[640];
 
+  // Each entity gets its own command_topic (config/set/<field>) so multiple
+  // simultaneous changes each get their own retained slot on the broker and
+  // aren't overwritten by each other. "retain":true ensures HA publishes the
+  // command as retained so sleeping sensors receive it on their next wake.
+  // No command_template needed — HA sends the raw field value directly.
+
   // ── Text: MQTT Broker ────────────────────────────────────
-  // "retain":true tells HA to publish commands as retained so sleeping
-  // sensors receive them on their next wake cycle when they subscribe.
   snprintf(payload, sizeof(payload),
     "{\"name\":\"MQTT Broker\",\"unique_id\":\"%s_cfg_mqtt_broker\","
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttBroker }}\","
-    "\"command_topic\":\"%s\","
-    "\"command_template\":\"{\\\"mqttBroker\\\": \\\"{{ value }}\\\"}\","
-    "\"retain\":true,\"max\":63,%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
+    "\"command_topic\":\"%s/mqttBroker\",\"retain\":true,\"max\":63,%s}",
+    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
   mqtt.publish(DISC_CFG_MQTT_BROKER, payload, true);
   mqtt.loop(); delay(50);
 
@@ -1525,10 +1467,9 @@ void publishConfigDiscovery() {
   snprintf(payload, sizeof(payload),
     "{\"name\":\"MQTT Port\",\"unique_id\":\"%s_cfg_mqtt_port\","
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPort }}\","
-    "\"command_topic\":\"%s\","
-    "\"command_template\":\"{\\\"mqttPort\\\": {{ value | int }}}\","
-    "\"retain\":true,\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
+    "\"command_topic\":\"%s/mqttPort\",\"retain\":true,"
+    "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
+    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
   mqtt.publish(DISC_CFG_MQTT_PORT, payload, true);
   mqtt.loop(); delay(50);
 
@@ -1536,10 +1477,8 @@ void publishConfigDiscovery() {
   snprintf(payload, sizeof(payload),
     "{\"name\":\"MQTT Username\",\"unique_id\":\"%s_cfg_mqtt_user\","
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttUser }}\","
-    "\"command_topic\":\"%s\","
-    "\"command_template\":\"{\\\"mqttUser\\\": \\\"{{ value }}\\\"}\","
-    "\"retain\":true,\"max\":31,%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
+    "\"command_topic\":\"%s/mqttUser\",\"retain\":true,\"max\":31,%s}",
+    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
   mqtt.publish(DISC_CFG_MQTT_USER, payload, true);
   mqtt.loop(); delay(50);
 
@@ -1547,10 +1486,8 @@ void publishConfigDiscovery() {
   snprintf(payload, sizeof(payload),
     "{\"name\":\"MQTT Password\",\"unique_id\":\"%s_cfg_mqtt_pass\","
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPassword }}\","
-    "\"command_topic\":\"%s\","
-    "\"command_template\":\"{\\\"mqttPassword\\\": \\\"{{ value }}\\\"}\","
-    "\"retain\":true,\"max\":63,%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
+    "\"command_topic\":\"%s/mqttPassword\",\"retain\":true,\"max\":63,%s}",
+    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
   mqtt.publish(DISC_CFG_MQTT_PASS, payload, true);
   mqtt.loop(); delay(50);
 
@@ -1558,10 +1495,8 @@ void publishConfigDiscovery() {
   snprintf(payload, sizeof(payload),
     "{\"name\":\"Syslog Host\",\"unique_id\":\"%s_cfg_syslog_host\","
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogHost }}\","
-    "\"command_topic\":\"%s\","
-    "\"command_template\":\"{\\\"syslogHost\\\": \\\"{{ value }}\\\"}\","
-    "\"retain\":true,\"max\":63,%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
+    "\"command_topic\":\"%s/syslogHost\",\"retain\":true,\"max\":63,%s}",
+    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
   mqtt.publish(DISC_CFG_SYSLOG_HOST, payload, true);
   mqtt.loop(); delay(50);
 
@@ -1569,10 +1504,9 @@ void publishConfigDiscovery() {
   snprintf(payload, sizeof(payload),
     "{\"name\":\"Syslog Port\",\"unique_id\":\"%s_cfg_syslog_port\","
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogPort }}\","
-    "\"command_topic\":\"%s\","
-    "\"command_template\":\"{\\\"syslogPort\\\": {{ value | int }}}\","
-    "\"retain\":true,\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
+    "\"command_topic\":\"%s/syslogPort\",\"retain\":true,"
+    "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
+    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
   mqtt.publish(DISC_CFG_SYSLOG_PORT, payload, true);
   mqtt.loop(); delay(50);
 
@@ -1689,7 +1623,7 @@ void setup() {
     }
 
     processMqttCommand();
-    processConfigMessage();
+    applyConfigChange();
   }
 
   mqtt.disconnect();
