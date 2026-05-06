@@ -16,7 +16,7 @@
 //  - Syslog: hostname resolved once at startup with 3 s timeout;
 //    uses pre-resolved IPAddress for all sends (no per-packet DNS blocking);
 //    syslog disabled for the cycle if DNS fails — no startup delay
-//  - Portal input validation: octet range (0–255), port range (1–65535),
+//  - Portal input validation: octet range (0-255), port range (1–65535),
 //    string length caps, control-character rejection, hostname/IP format
 //    checks on mqttBroker and syslogHost; specific error message shown
 //
@@ -345,6 +345,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Moisture Sensor Setup</title>
 <style>
@@ -512,13 +513,62 @@ function toggleNet(cb) {
     cb.checked ? 'block' : 'none';
   if (cb.checked) syncNet();
 }
-document.querySelector('form').addEventListener('submit', function(e) {
-  var h = document.getElementById('syslogHost').value.trim();
-  if (h.length > 0 && h.indexOf('.') === -1) {
-    e.preventDefault();
-    alert('Syslog server must be an IP address or FQDN (must contain a dot), or leave blank to disable.');
+function isValidIP(s) {
+  var p = s.split('.');
+  if (p.length !== 4) return false;
+  return p.every(function(o) {
+    return /^\d+$/.test(o) && parseInt(o,10) >= 0 && parseInt(o,10) <= 255;
+  });
+}
+function isValidHost(s) {
+  if (!s.length) return false;
+  if (s.indexOf('.') === -1) return false;
+  if (!/^[A-Za-z0-9.\-]+$/.test(s)) return false;
+  if (s[0]==='.' || s[0]==='-' || s[s.length-1]==='.' || s[s.length-1]==='-') return false;
+  if (/^[\d.]+$/.test(s)) return isValidIP(s);
+  return true;
+}
+function v(id){ return document.querySelector('[name='+id+']').value.trim(); }
+function validateForm(e) {
+  var n = parseInt(v('sensorNum'),10);
+  if (isNaN(n)||n<1||n>254)
+    return alert('Sensor number must be between 1 and 254.'), e.preventDefault();
+  if (!v('ssid'))
+    return alert('WiFi SSID is required.'), e.preventDefault();
+  if (v('ssid').length>63)
+    return alert('WiFi SSID is too long (max 63 characters).'), e.preventDefault();
+  if (v('wifiPass').length>63)
+    return alert('WiFi password is too long (max 63 characters).'), e.preventDefault();
+  if (document.querySelector('[name=staticIP]').checked) {
+    var names=['ip','gw','sn','dns'];
+    for(var i=0;i<names.length;i++){
+      for(var j=1;j<=4;j++){
+        var val=parseInt(v(names[i]+j),10);
+        if(isNaN(val)||val<0||val>255)
+          return alert('IP field '+names[i]+j+' must be 0-255.'), e.preventDefault();
+      }
+    }
   }
-});
+  var broker = v('mqttBroker');
+  if (!broker)
+    return alert('MQTT broker address is required.'), e.preventDefault();
+  if (!isValidHost(broker))
+    return alert('MQTT broker must be a valid IP address or hostname (e.g. 192.168.1.1 or mqtt.local).\n\nInvalid: ' + broker), e.preventDefault();
+  var mp = parseInt(v('mqttPort'),10);
+  if (v('mqttPort') && (isNaN(mp)||mp<1||mp>65535))
+    return alert('MQTT port must be between 1 and 65535.'), e.preventDefault();
+  if (v('mqttUser').length>31)
+    return alert('MQTT username is too long (max 31 characters).'), e.preventDefault();
+  if (v('mqttPass').length>63)
+    return alert('MQTT password is too long (max 63 characters).'), e.preventDefault();
+  var sh = v('syslogHost');
+  if (sh.length>0 && !isValidHost(sh))
+    return alert('Syslog host must be a valid IP address or fully-qualified hostname (e.g. 192.168.1.10 or logs.local).\n\nInvalid: ' + sh), e.preventDefault();
+  var sp = parseInt(v('syslogPort'),10);
+  if (v('syslogPort') && (isNaN(sp)||sp<1||sp>65535))
+    return alert('Syslog port must be between 1 and 65535.'), e.preventDefault();
+}
+document.querySelector('form').addEventListener('submit', validateForm);
 </script>
 </body>
 </html>
@@ -590,7 +640,7 @@ static String validateHost(const String& s, const char* label) {
   if (looksLikeIP) {
     IPAddress ip;
     if (!ip.fromString(s))
-      return String(label) + " '" + s + "' is not a valid IP address (each octet must be 0–255).";
+      return String(label) + " '" + s + "' is not a valid IP address (each octet must be 0-255).";
   }
 
   return "";
@@ -628,11 +678,11 @@ static String validateSave() {
         return String("IP field '") + ipFields[i] + "' is empty.";
       for (int j = 0; j < (int)v.length(); j++) {
         if (!isdigit((uint8_t)v[j]))
-          return String("IP field '") + ipFields[i] + "' must be a number (0–255).";
+          return String("IP field '") + ipFields[i] + "' must be a number (0-255).";
       }
       int oct = v.toInt();
       if (oct < 0 || oct > 255)
-        return String("IP field '") + ipFields[i] + "' must be 0–255 (got " + v + ").";
+        return String("IP field '") + ipFields[i] + "' must be 0-255 (got " + v + ").";
     }
   }
 
@@ -676,6 +726,7 @@ static String validateSave() {
 static void sendError(const String& reason) {
   String html =
     "<!DOCTYPE html><html><head>"
+    "<meta charset=\"utf-8\">"
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
     "<title>Invalid input</title>"
     "<style>body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:0 16px;"
