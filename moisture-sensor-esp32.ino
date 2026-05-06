@@ -1159,89 +1159,82 @@ bool connectWifi() {
 WiFiClient   wifiClient;
 PubSubClient mqtt(wifiClient);
 
-bool cmdReceived       = false;
-char cmdPayload[32]    = "";
-bool configChanged = false;   // set in mqttCallback when any config/set/+ field is applied
+bool cmdReceived    = false;
+char cmdPayload[32] = "";
 
+// ── Pending remote config updates ────────────────────────────
+// Set in mqttCallback (minimal work only — no validation, no String objects,
+// no mqtt.loop() — see note on callback safety below).
+// Processed in applyConfigChange() outside the callback.
+static char pendingMqttBroker[64]    = "";
+static char pendingMqttPort[8]       = "";
+static char pendingMqttUser[32]      = "";
+static char pendingMqttPassword[64]  = "";
+static char pendingSyslogHost[64]    = "";
+static char pendingSyslogPort[8]     = "";
+static uint8_t pendingFields         = 0;   // bitmask — which fields arrived this cycle
+#define PF_MQTT_BROKER    (1<<0)
+#define PF_MQTT_PORT      (1<<1)
+#define PF_MQTT_USER      (1<<2)
+#define PF_MQTT_PASSWORD  (1<<3)
+#define PF_SYSLOG_HOST    (1<<4)
+#define PF_SYSLOG_PORT    (1<<5)
+
+// ── IMPORTANT: callback safety rules ────────────────────────
+// PubSubClient passes topic and payload as pointers INTO its internal buffer.
+// Calling mqtt.publish() inside the callback overwrites that same buffer, so
+// topic/payload become invalid immediately after. Calling mqtt.loop() inside
+// the callback can trigger re-entrant processing, corrupting internal state.
+//
+// Rules enforced here:
+//   1. Copy ALL data needed (topic suffix, payload) to local/global buffers
+//      BEFORE calling mqtt.publish() to clear the retained message.
+//   2. Never call mqtt.loop() inside the callback.
+//   3. Never allocate heap (no String objects) inside the callback.
+//   4. Never call validateHost() or other functions that create String objects.
+//
+// All validation, cfg mutation, and logging happens in applyConfigChange()
+// outside the callback, after the listen loop completes.
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (length == 0) return;
 
   if (strcmp(topic, CMD_TOPIC) == 0) {
+    // ── Command (restart / reset) ──────────────────────────
     if (length >= sizeof(cmdPayload)) return;
     memcpy(cmdPayload, payload, length);
     cmdPayload[length] = '\0';
     cmdReceived = true;
-    logf("Command   — received: %s\n", cmdPayload);
-    mqtt.publish(CMD_TOPIC, "", true);   // clear retained
-    mqtt.loop();
+    mqtt.publish(CMD_TOPIC, "", true);   // clear retained — no mqtt.loop() inside callbacks
 
   } else {
-    // Check for config/set/+ wildcard topics
+    // ── Config update (config/set/<field>) ────────────────
     size_t prefixLen = strlen(CONFIG_SET_PREFIX);
-    if (strncmp(topic, CONFIG_SET_PREFIX, prefixLen) == 0 &&
-        topic[prefixLen] == '/') {
-      const char* field = topic + prefixLen + 1;
+    if (strncmp(topic, CONFIG_SET_PREFIX, prefixLen) != 0 ||
+        topic[prefixLen] != '/') return;
 
-      char val[128] = "";
-      if (length > 0 && length < sizeof(val)) {
-        memcpy(val, payload, length);
-        val[length] = '\0';
-      }
+    // Step 1: copy field name BEFORE mqtt.publish() overwrites the buffer
+    char fieldName[32];
+    strlcpy(fieldName, topic + prefixLen + 1, sizeof(fieldName));
 
-      // Clear this field's retained slot immediately — before validation so a
-      // bad value doesn't keep re-firing on every wake until manually cleared.
-      mqtt.publish(topic, "", true);
-      mqtt.loop();
-
-      String v(val);
-      String err;
-
-      if (strcmp(field, "mqttBroker") == 0) {
-        err = validateHost(v, "MQTT broker");
-        if (err.length()) { logf("Config    — mqttBroker rejected: %s\n", err.c_str()); return; }
-        strlcpy(cfg.mqttBroker, val, sizeof(cfg.mqttBroker));
-        logf("Config    — mqttBroker -> %s\n", val);
-        configChanged = true;
-
-      } else if (strcmp(field, "mqttPort") == 0) {
-        int p = atoi(val);
-        if (p < 1 || p > 65535) { logf("Config    — mqttPort rejected: must be 1-65535\n"); return; }
-        cfg.mqttPort = p;
-        logf("Config    — mqttPort -> %d\n", p);
-        configChanged = true;
-
-      } else if (strcmp(field, "mqttUser") == 0) {
-        if (v.length() > 31)    { logf("Config    — mqttUser rejected: too long\n"); return; }
-        if (hasControlChars(v)) { logf("Config    — mqttUser rejected: control chars\n"); return; }
-        strlcpy(cfg.mqttUser, val, sizeof(cfg.mqttUser));
-        logf("Config    — mqttUser -> %s\n", val);
-        configChanged = true;
-
-      } else if (strcmp(field, "mqttPassword") == 0) {
-        if (v.length() > 63)    { logf("Config    — mqttPassword rejected: too long\n"); return; }
-        if (hasControlChars(v)) { logf("Config    — mqttPassword rejected: control chars\n"); return; }
-        strlcpy(cfg.mqttPassword, val, sizeof(cfg.mqttPassword));
-        logf("Config    — mqttPassword updated\n");  // value not logged
-        configChanged = true;
-
-      } else if (strcmp(field, "syslogHost") == 0) {
-        err = (v.length() > 0) ? validateHost(v, "Syslog host") : "";
-        if (err.length()) { logf("Config    — syslogHost rejected: %s\n", err.c_str()); return; }
-        strlcpy(cfg.syslogHost, val, sizeof(cfg.syslogHost));
-        logf("Config    — syslogHost -> '%s'\n", val);
-        configChanged = true;
-
-      } else if (strcmp(field, "syslogPort") == 0) {
-        int p = atoi(val);
-        if (p < 1 || p > 65535) { logf("Config    — syslogPort rejected: must be 1-65535\n"); return; }
-        cfg.syslogPort = p;
-        logf("Config    — syslogPort -> %d\n", p);
-        configChanged = true;
-
-      } else {
-        logf("Config    — unknown field: %s\n", field);
-      }
+    // Step 2: copy payload value
+    char val[128] = "";
+    if (length < sizeof(val)) {
+      memcpy(val, payload, length);
+      val[length] = '\0';
     }
+
+    // Step 3: clear retained slot — topic pointer is safe to use here because
+    // we already copied everything we need above.
+    mqtt.publish(topic, "", true);   // no mqtt.loop()
+
+    // Step 4: store in pending buffers; validation happens in applyConfigChange()
+    if      (strcmp(fieldName, "mqttBroker")   == 0) { strlcpy(pendingMqttBroker,   val, sizeof(pendingMqttBroker));   pendingFields |= PF_MQTT_BROKER;   }
+    else if (strcmp(fieldName, "mqttPort")     == 0) { strlcpy(pendingMqttPort,     val, sizeof(pendingMqttPort));     pendingFields |= PF_MQTT_PORT;     }
+    else if (strcmp(fieldName, "mqttUser")     == 0) { strlcpy(pendingMqttUser,     val, sizeof(pendingMqttUser));     pendingFields |= PF_MQTT_USER;     }
+    else if (strcmp(fieldName, "mqttPassword") == 0) { strlcpy(pendingMqttPassword, val, sizeof(pendingMqttPassword)); pendingFields |= PF_MQTT_PASSWORD; }
+    else if (strcmp(fieldName, "syslogHost")   == 0) { strlcpy(pendingSyslogHost,   val, sizeof(pendingSyslogHost));   pendingFields |= PF_SYSLOG_HOST;   }
+    else if (strcmp(fieldName, "syslogPort")   == 0) { strlcpy(pendingSyslogPort,   val, sizeof(pendingSyslogPort));   pendingFields |= PF_SYSLOG_PORT;   }
+    // Unknown fields: already cleared above, silently ignored
   }
 }
 
@@ -1283,6 +1276,7 @@ void connectMqtt() {
 void processMqttCommand() {
   if (!cmdReceived) return;
   cmdReceived = false;
+  logf("Command   — received: %s\n", cmdPayload);
 
   if (strcmp(cmdPayload, "reset") == 0) {
     logf("Command   — resetting config and restarting into portal\n");
@@ -1418,18 +1412,64 @@ void publishConfigState() {
   logf("Config    — state published to %s\n", CONFIG_STATE_TOPIC);
 }
 
-// Called after the listen window. If any config/set/+ messages were received
-// and applied during mqttCallback, saves to NVS and restarts to pick up
-// the new settings. All validation and cfg mutation already happened in the
-// callback — this just commits and reboots.
+// Called after the listen window. Validates and applies any config/set/+
+// messages that arrived during mqttCallback (stored in pending* globals).
+// Saves to NVS and restarts if any field passes validation.
 void applyConfigChange() {
-  if (!configChanged) return;
-  saveConfig(cfg);
-  publishConfigState();   // update retained state before restarting
-  logf("Config    — all changes saved, restarting\n");
-  Serial.flush();
-  delay(500);
-  ESP.restart();
+  if (!pendingFields) return;
+
+  bool changed = false;
+  String err;
+
+  if (pendingFields & PF_MQTT_BROKER) {
+    err = validateHost(String(pendingMqttBroker), "MQTT broker");
+    if (err.length()) { logf("Config    — mqttBroker rejected: %s\n", err.c_str()); }
+    else { strlcpy(cfg.mqttBroker, pendingMqttBroker, sizeof(cfg.mqttBroker)); logf("Config    — mqttBroker -> %s\n", pendingMqttBroker); changed = true; }
+  }
+
+  if (pendingFields & PF_MQTT_PORT) {
+    int p = atoi(pendingMqttPort);
+    if (p < 1 || p > 65535) { logf("Config    — mqttPort rejected: must be 1-65535\n"); }
+    else { cfg.mqttPort = p; logf("Config    — mqttPort -> %d\n", p); changed = true; }
+  }
+
+  if (pendingFields & PF_MQTT_USER) {
+    String s(pendingMqttUser);
+    if (s.length() > 31)    { logf("Config    — mqttUser rejected: too long\n"); }
+    else if (hasControlChars(s)) { logf("Config    — mqttUser rejected: control chars\n"); }
+    else { strlcpy(cfg.mqttUser, pendingMqttUser, sizeof(cfg.mqttUser)); logf("Config    — mqttUser -> %s\n", pendingMqttUser); changed = true; }
+  }
+
+  if (pendingFields & PF_MQTT_PASSWORD) {
+    String s(pendingMqttPassword);
+    if (s.length() > 63)    { logf("Config    — mqttPassword rejected: too long\n"); }
+    else if (hasControlChars(s)) { logf("Config    — mqttPassword rejected: control chars\n"); }
+    else { strlcpy(cfg.mqttPassword, pendingMqttPassword, sizeof(cfg.mqttPassword)); logf("Config    — mqttPassword updated\n"); changed = true; }
+  }
+
+  if (pendingFields & PF_SYSLOG_HOST) {
+    String s(pendingSyslogHost);
+    err = (s.length() > 0) ? validateHost(s, "Syslog host") : "";
+    if (err.length()) { logf("Config    — syslogHost rejected: %s\n", err.c_str()); }
+    else { strlcpy(cfg.syslogHost, pendingSyslogHost, sizeof(cfg.syslogHost)); logf("Config    — syslogHost -> '%s'\n", pendingSyslogHost); changed = true; }
+  }
+
+  if (pendingFields & PF_SYSLOG_PORT) {
+    int p = atoi(pendingSyslogPort);
+    if (p < 1 || p > 65535) { logf("Config    — syslogPort rejected: must be 1-65535\n"); }
+    else { cfg.syslogPort = p; logf("Config    — syslogPort -> %d\n", p); changed = true; }
+  }
+
+  if (changed) {
+    saveConfig(cfg);
+    publishConfigState();
+    logf("Config    — all changes saved, restarting\n");
+    Serial.flush();
+    delay(500);
+    ESP.restart();
+  } else {
+    logf("Config    — pending fields present but none passed validation\n");
+  }
 }
 
 // Publishes HA MQTT autodiscovery payloads for the 6 remote-configurable
