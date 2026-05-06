@@ -16,6 +16,9 @@
 //  - Syslog: hostname resolved once at startup with 3 s timeout;
 //    uses pre-resolved IPAddress for all sends (no per-packet DNS blocking);
 //    syslog disabled for the cycle if DNS fails — no startup delay
+//  - Portal input validation: octet range (0–255), port range (1–65535),
+//    string length caps, control-character rejection, hostname/IP format
+//    checks on mqttBroker and syslogHost; specific error message shown
 //
 //  v2.2.0
 //  - saveConfig() takes Config struct (was 24 params)
@@ -541,25 +544,135 @@ const char SAVED_HTML[] PROGMEM = R"rawhtml(
 </html>
 )rawhtml";
 
-const char ERROR_HTML[] PROGMEM = R"rawhtml(
-<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Invalid input</title>
-<style>
-  body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:0 16px;
-    text-align:center;background:#f5f5f5}
-  h1{color:#c0392b}p{color:#555}a{color:#2c7a4b}
-</style>
-</head>
-<body>
-<h1>Invalid input</h1>
-<p>Sensor number must be 1–254. WiFi SSID and MQTT broker address are required.</p>
-<p><a href="/">Go back</a></p>
-</body>
-</html>
-)rawhtml";
+// Error page is generated dynamically so the specific reason can be shown.
+
+// ═══════════════════════════════════════════════════════════
+//  INPUT VALIDATION HELPERS
+// ═══════════════════════════════════════════════════════════
+
+// Returns true if the string contains any ASCII control character (< 0x20 or DEL).
+static bool hasControlChars(const String& s) {
+  for (int i = 0; i < (int)s.length(); i++) {
+    uint8_t c = (uint8_t)s[i];
+    if (c < 0x20 || c == 0x7F) return true;
+  }
+  return false;
+}
+
+// Returns true if every character is valid in a hostname or IP address: [A-Za-z0-9.-]
+static bool isValidHostChars(const String& s) {
+  for (int i = 0; i < (int)s.length(); i++) {
+    char c = s[i];
+    if (!isalnum((uint8_t)c) && c != '.' && c != '-') return false;
+  }
+  return true;
+}
+
+// Validates a hostname/IP string: non-empty, valid chars, contains a dot,
+// doesn't start or end with a dot or hyphen.
+static String validateHost(const String& s, const char* label) {
+  if (s.length() == 0)           return String(label) + " is required.";
+  if (s.length() > 63)           return String(label) + " is too long (max 63 characters).";
+  if (!isValidHostChars(s))      return String(label) + " contains invalid characters — use only letters, digits, hyphens and dots.";
+  if (s.indexOf('.') == -1)      return String(label) + " must be an IP address or fully-qualified hostname (e.g. 192.168.1.1 or mqtt.local).";
+  if (s[0] == '.' || s[0] == '-')
+    return String(label) + " must not start with a dot or hyphen.";
+  if (s[s.length()-1] == '.' || s[s.length()-1] == '-')
+    return String(label) + " must not end with a dot or hyphen.";
+  return "";
+}
+
+// Validates all POST fields from the config form.
+// Returns an empty string on success, or a human-readable error on failure.
+static String validateSave() {
+  // ── Sensor number ───────────────────────────────────────
+  int sensorNum = server.arg("sensorNum").toInt();
+  if (sensorNum < 1 || sensorNum > 254)
+    return "Sensor number must be between 1 and 254.";
+
+  // ── WiFi SSID ───────────────────────────────────────────
+  String ssid = server.arg("ssid");
+  if (ssid.length() == 0)   return "WiFi SSID is required.";
+  if (ssid.length() > 63)   return "WiFi SSID is too long (max 63 characters).";
+
+  // ── WiFi password (optional) ────────────────────────────
+  String wifiPass = server.arg("wifiPass");
+  if (wifiPass.length() > 63)          return "WiFi password is too long (max 63 characters).";
+  if (hasControlChars(wifiPass))       return "WiFi password contains control characters.";
+
+  // ── Static IP octets ────────────────────────────────────
+  if (server.hasArg("staticIP")) {
+    static const char* ipFields[] = {
+      "ip1","ip2","ip3","ip4",
+      "gw1","gw2","gw3","gw4",
+      "sn1","sn2","sn3","sn4",
+      "dns1","dns2","dns3","dns4"
+    };
+    for (int i = 0; i < 16; i++) {
+      String v = server.arg(ipFields[i]);
+      if (v.length() == 0)
+        return String("IP field '") + ipFields[i] + "' is empty.";
+      for (int j = 0; j < (int)v.length(); j++) {
+        if (!isdigit((uint8_t)v[j]))
+          return String("IP field '") + ipFields[i] + "' must be a number (0–255).";
+      }
+      int oct = v.toInt();
+      if (oct < 0 || oct > 255)
+        return String("IP field '") + ipFields[i] + "' must be 0–255 (got " + v + ").";
+    }
+  }
+
+  // ── MQTT broker ─────────────────────────────────────────
+  String err = validateHost(server.arg("mqttBroker"), "MQTT broker");
+  if (err.length()) return err;
+
+  // ── MQTT port ───────────────────────────────────────────
+  String mqttPortStr = server.arg("mqttPort");
+  if (mqttPortStr.length() > 0) {
+    int p = mqttPortStr.toInt();
+    if (p < 1 || p > 65535) return "MQTT port must be between 1 and 65535.";
+  }
+
+  // ── MQTT credentials (optional) ─────────────────────────
+  String mqttUser = server.arg("mqttUser");
+  String mqttPass = server.arg("mqttPass");
+  if (mqttUser.length() > 31)     return "MQTT username is too long (max 31 characters).";
+  if (mqttPass.length() > 63)     return "MQTT password is too long (max 63 characters).";
+  if (hasControlChars(mqttUser))  return "MQTT username contains control characters.";
+  if (hasControlChars(mqttPass))  return "MQTT password contains control characters.";
+
+  // ── Syslog host (optional) ──────────────────────────────
+  String syslogHost = server.arg("syslogHost");
+  if (syslogHost.length() > 0) {
+    err = validateHost(syslogHost, "Syslog host");
+    if (err.length()) return err;
+  }
+
+  // ── Syslog port (optional) ──────────────────────────────
+  String syslogPortStr = server.arg("syslogPort");
+  if (syslogPortStr.length() > 0) {
+    int p = syslogPortStr.toInt();
+    if (p < 1 || p > 65535) return "Syslog port must be between 1 and 65535.";
+  }
+
+  return "";  // all good
+}
+
+// Sends a 400 error page with a specific reason shown to the user.
+static void sendError(const String& reason) {
+  String html =
+    "<!DOCTYPE html><html><head>"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>Invalid input</title>"
+    "<style>body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:0 16px;"
+    "text-align:center;background:#f5f5f5}h1{color:#c0392b}p{color:#555}a{color:#2c7a4b}</style>"
+    "</head><body>"
+    "<h1>Invalid input</h1>"
+    "<p>" + reason + "</p>"
+    "<p><a href=\"/\">Go back</a></p>"
+    "</body></html>";
+  server.send(400, "text/html", html);
+}
 
 // ═══════════════════════════════════════════════════════════
 //  PORTAL HANDLERS
@@ -570,18 +683,13 @@ void handleRoot() {
 }
 
 void handleSave() {
-  int sensorNum = server.arg("sensorNum").toInt();
-
-  String syslogHost = server.arg("syslogHost");
-  bool syslogHostBad = syslogHost.length() > 0 && syslogHost.indexOf('.') == -1;
-
-  if (sensorNum < 1 || sensorNum > 254 ||
-      server.arg("ssid").length() == 0 ||
-      server.arg("mqttBroker").length() == 0 ||
-      syslogHostBad) {
-    server.send_P(400, "text/html", ERROR_HTML);
+  String err = validateSave();
+  if (err.length()) {
+    sendError(err);
     return;
   }
+
+  int sensorNum = server.arg("sensorNum").toInt();
 
   Config c = {};
   c.sensorNumber = sensorNum;
