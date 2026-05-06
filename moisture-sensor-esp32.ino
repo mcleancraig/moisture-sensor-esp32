@@ -518,8 +518,11 @@ function toggleNet(cb) {
   if (cb.checked) syncNet();
 }
 function isValidIP(s) {
+  // Must be exactly 4 dot-separated segments, each a number 0-255.
+  // Explicit dot count guards against LWIP-style short forms like "999.999".
+  var dots = (s.match(/\./g)||[]).length;
+  if (dots !== 3) return false;
   var p = s.split('.');
-  if (p.length !== 4) return false;
   return p.every(function(o) {
     return /^\d+$/.test(o) && parseInt(o,10) >= 0 && parseInt(o,10) <= 255;
   });
@@ -636,15 +639,33 @@ static String validateHost(const String& s, const char* label) {
   if (s[s.length()-1] == '.' || s[s.length()-1] == '-')
     return String(label) + " must not end with a dot or hyphen.";
 
-  // If every character is a digit or dot, it must be a valid IPv4 address.
+  // If every character is a digit or dot, validate strictly as IPv4.
+  // We do NOT use IPAddress::fromString() here because LWIP accepts non-standard
+  // short forms like "999.999" (BSD two-part notation) as valid.
+  // Instead: count dots (must be exactly 3), then check each octet is 0-255.
   bool looksLikeIP = true;
   for (int i = 0; i < (int)s.length(); i++) {
     if (!isdigit((uint8_t)s[i]) && s[i] != '.') { looksLikeIP = false; break; }
   }
   if (looksLikeIP) {
-    IPAddress ip;
-    if (!ip.fromString(s))
-      return String(label) + " '" + s + "' is not a valid IP address (each octet must be 0-255).";
+    // Count dots
+    int dots = 0;
+    for (int i = 0; i < (int)s.length(); i++) if (s[i] == '.') dots++;
+    if (dots != 3)
+      return String(label) + " '" + s + "' is not a valid IPv4 address — must have exactly 4 octets.";
+    // Validate each octet
+    int start = 0;
+    for (int i = 0; i <= (int)s.length(); i++) {
+      if (i == (int)s.length() || s[i] == '.') {
+        String seg = s.substring(start, i);
+        if (seg.length() == 0 || seg.length() > 3)
+          return String(label) + " '" + s + "' — octet '" + seg + "' is invalid.";
+        int val = seg.toInt();
+        if (val < 0 || val > 255)
+          return String(label) + " '" + s + "' — octet " + seg + " must be 0-255.";
+        start = i + 1;
+      }
+    }
   }
 
   return "";
