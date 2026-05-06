@@ -493,6 +493,10 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
       Syslog add-on.</p>
   </div>
 
+  <div id="err" style="display:none;background:#fde8e8;border:1px solid #c0392b;
+    border-radius:8px;padding:12px 16px;margin-top:12px;color:#c0392b;
+    font-size:.9em;font-weight:600"></div>
+
   <button type="submit">Save &amp; Restart</button>
 </form>
 
@@ -518,62 +522,72 @@ function toggleNet(cb) {
   if (cb.checked) syncNet();
 }
 function isValidIP(s) {
-  // Must be exactly 4 dot-separated segments, each a number 0-255.
-  // Explicit dot count guards against LWIP-style short forms like "999.999".
   var dots = (s.match(/\./g)||[]).length;
   if (dots !== 3) return false;
   var p = s.split('.');
+  if (p.length !== 4) return false;
   return p.every(function(o) {
     return /^\d+$/.test(o) && parseInt(o,10) >= 0 && parseInt(o,10) <= 255;
   });
 }
 function isValidHost(s) {
-  if (!s.length) return false;
+  if (!s || !s.length) return false;
   if (s.indexOf('.') === -1) return false;
   if (!/^[A-Za-z0-9.\-]+$/.test(s)) return false;
   if (s[0]==='.' || s[0]==='-' || s[s.length-1]==='.' || s[s.length-1]==='-') return false;
   if (/^[\d.]+$/.test(s)) return isValidIP(s);
   return true;
 }
-function v(id){ return document.querySelector('[name='+id+']').value.trim(); }
+function v(id) {
+  var el = document.querySelector('[name="'+id+'"]');
+  return el ? el.value.trim() : '';
+}
+function fail(e, msg) {
+  var el = document.getElementById('err');
+  el.textContent = msg;
+  el.style.display = 'block';
+  el.scrollIntoView({behavior:'smooth', block:'center'});
+  e.preventDefault();
+}
 function validateForm(e) {
+  document.getElementById('err').style.display = 'none';
   var n = parseInt(v('sensorNum'),10);
   if (isNaN(n)||n<1||n>254)
-    return alert('Sensor number must be between 1 and 254.'), e.preventDefault();
+    return fail(e, 'Sensor number must be between 1 and 254.');
   if (!v('ssid'))
-    return alert('WiFi SSID is required.'), e.preventDefault();
+    return fail(e, 'WiFi SSID is required.');
   if (v('ssid').length>63)
-    return alert('WiFi SSID is too long (max 63 characters).'), e.preventDefault();
+    return fail(e, 'WiFi SSID is too long (max 63 characters).');
   if (v('wifiPass').length>63)
-    return alert('WiFi password is too long (max 63 characters).'), e.preventDefault();
-  if (document.querySelector('[name=staticIP]').checked) {
-    var names=['ip','gw','sn','dns'];
-    for(var i=0;i<names.length;i++){
-      for(var j=1;j<=4;j++){
-        var val=parseInt(v(names[i]+j),10);
-        if(isNaN(val)||val<0||val>255)
-          return alert('IP field '+names[i]+j+' must be 0-255.'), e.preventDefault();
+    return fail(e, 'WiFi password is too long (max 63 characters).');
+  if (document.querySelector('[name="staticIP"]').checked) {
+    var ipGroups=['ip','gw','sn','dns'];
+    for (var i=0;i<ipGroups.length;i++) {
+      for (var j=1;j<=4;j++) {
+        var val=parseInt(v(ipGroups[i]+j),10);
+        if (isNaN(val)||val<0||val>255)
+          return fail(e, 'IP field '+ipGroups[i]+j+' must be 0-255.');
       }
     }
   }
   var broker = v('mqttBroker');
   if (!broker)
-    return alert('MQTT broker address is required.'), e.preventDefault();
+    return fail(e, 'MQTT broker address is required.');
   if (!isValidHost(broker))
-    return alert('MQTT broker must be a valid IP address or hostname (e.g. 192.168.1.1 or mqtt.local).\n\nInvalid: ' + broker), e.preventDefault();
+    return fail(e, 'MQTT broker must be a valid IP address or fully-qualified hostname (e.g. 192.168.1.1 or mqtt.local). Invalid value: "' + broker + '"');
   var mp = parseInt(v('mqttPort'),10);
   if (v('mqttPort') && (isNaN(mp)||mp<1||mp>65535))
-    return alert('MQTT port must be between 1 and 65535.'), e.preventDefault();
+    return fail(e, 'MQTT port must be between 1 and 65535.');
   if (v('mqttUser').length>31)
-    return alert('MQTT username is too long (max 31 characters).'), e.preventDefault();
+    return fail(e, 'MQTT username is too long (max 31 characters).');
   if (v('mqttPass').length>63)
-    return alert('MQTT password is too long (max 63 characters).'), e.preventDefault();
+    return fail(e, 'MQTT password is too long (max 63 characters).');
   var sh = v('syslogHost');
   if (sh.length>0 && !isValidHost(sh))
-    return alert('Syslog host must be a valid IP address or fully-qualified hostname (e.g. 192.168.1.10 or logs.local).\n\nInvalid: ' + sh), e.preventDefault();
+    return fail(e, 'Syslog host must be a valid IP address or fully-qualified hostname (e.g. 192.168.1.10 or logs.local). Invalid value: "' + sh + '"');
   var sp = parseInt(v('syslogPort'),10);
   if (v('syslogPort') && (isNaN(sp)||sp<1||sp>65535))
-    return alert('Syslog port must be between 1 and 65535.'), e.preventDefault();
+    return fail(e, 'Syslog port must be between 1 and 65535.');
 }
 document.querySelector('form').addEventListener('submit', validateForm);
 </script>
