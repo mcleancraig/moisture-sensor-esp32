@@ -13,6 +13,9 @@
 //  v2.3.0
 //  - HA MQTT autodiscovery: Restart and Reset Config button entities
 //    appear automatically in the device card in Home Assistant
+//  - Syslog: hostname resolved once at startup with 3 s timeout;
+//    uses pre-resolved IPAddress for all sends (no per-packet DNS blocking);
+//    syslog disabled for the cycle if DNS fails — no startup delay
 //
 //  v2.2.0
 //  - saveConfig() takes Config struct (was 24 params)
@@ -234,9 +237,10 @@ struct SyslogEntry {
 };
 
 static SyslogEntry syslogBuf[SYSLOG_LINES];
-static int  syslogHead  = 0;
-static int  syslogTotal = 0;
-static bool syslogReady = false;
+static int       syslogHead  = 0;
+static int       syslogTotal = 0;
+static bool      syslogReady = false;
+static IPAddress syslogIP;          // resolved once in syslogFlush(); used by syslogSend()
 
 WiFiUDP syslogUdp;
 
@@ -263,13 +267,27 @@ void syslogSend(const char* func, const char* msg) {
   snprintf(packet, sizeof(packet), "<134>%s %s moisture-sensor-esp32[%s]: %s",
     timestamp, hostname, func, clean);
 
-  syslogUdp.beginPacket(cfg.syslogHost, cfg.syslogPort);
+  // Use pre-resolved IPAddress — beginPacket(IPAddress) never blocks
+  syslogUdp.beginPacket(syslogIP, cfg.syslogPort);
   syslogUdp.print(packet);
   syslogUdp.endPacket();
 }
 
 void syslogFlush() {
   if (strlen(cfg.syslogHost) == 0) { syslogReady = true; return; }
+
+  // Resolve hostname → IP once, with a 3 s timeout.
+  // If the host is already a numeric IP, hostByName() returns immediately.
+  // On failure syslog is silently disabled for this wake cycle — nothing else blocks.
+  if (WiFi.hostByName(cfg.syslogHost, syslogIP, 3000) != 1) {
+    Serial.printf("[syslogFlush] DNS failed for '%s' — syslog disabled this cycle\n",
+      cfg.syslogHost);
+    syslogReady = true;   // prevent the buffer loop in _logf() from queueing further
+    syslogHead  = 0;
+    syslogTotal = 0;
+    return;
+  }
+
   int count = min(syslogTotal, SYSLOG_LINES);
   int start = (syslogTotal >= SYSLOG_LINES) ? syslogHead : 0;
   for (int i = 0; i < count; i++) {
@@ -290,7 +308,10 @@ void _logf(const char* func, const char* fmt, ...) {
   va_end(args);
   Serial.print(line);
 
+  // Skip syslog if not configured, or if DNS resolution failed this cycle
+  // (syslogIP == 0 means either not yet resolved or resolution failed)
   if (strlen(cfg.syslogHost) == 0) return;
+  if (syslogReady && (uint32_t)syslogIP == 0) return;
 
   char sysline[SYSLOG_LINE];
   strlcpy(sysline, line, sizeof(sysline));
