@@ -10,6 +10,10 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.3.0
+//  - HA MQTT autodiscovery: Restart and Reset Config button entities
+//    appear automatically in the device card in Home Assistant
+//
 //  v2.2.0
 //  - saveConfig() takes Config struct (was 24 params)
 //  - IP addresses stored as 4-byte NVS blocks (auto-migrates old per-octet keys)
@@ -35,7 +39,7 @@
 //  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
 
-#define FIRMWARE_VERSION "2.2.0"
+#define FIRMWARE_VERSION "2.3.0-dev"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -191,6 +195,8 @@ char DISC_MOISTURE[128];
 char DISC_BAT_V[128];
 char DISC_BAT_PCT[128];
 char DISC_TS[128];
+char DISC_BTN_RESTART[128];
+char DISC_BTN_RESET[128];
 
 void buildDerivedConfig() {
   snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.sensorNumber);
@@ -198,13 +204,17 @@ void buildDerivedConfig() {
   snprintf(STATE_TOPIC, sizeof(STATE_TOPIC), "garden/%s/state",           SENSOR_ID);
   snprintf(CMD_TOPIC,   sizeof(CMD_TOPIC),   "garden/%s/cmd",             SENSOR_ID);
   snprintf(DISC_MOISTURE, sizeof(DISC_MOISTURE),
-    "%s/sensor/%s_moisture/config",    HA_DISCOVERY_PREFIX, SENSOR_ID);
+    "%s/sensor/%s_moisture/config",        HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BAT_V, sizeof(DISC_BAT_V),
-    "%s/sensor/%s_battery_v/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
+    "%s/sensor/%s_battery_v/config",       HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BAT_PCT, sizeof(DISC_BAT_PCT),
-    "%s/sensor/%s_battery_pct/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+    "%s/sensor/%s_battery_pct/config",     HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_TS, sizeof(DISC_TS),
-    "%s/sensor/%s_ts/config",          HA_DISCOVERY_PREFIX, SENSOR_ID);
+    "%s/sensor/%s_ts/config",              HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_BTN_RESTART, sizeof(DISC_BTN_RESTART),
+    "%s/button/%s_restart/config",         HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_BTN_RESET, sizeof(DISC_BTN_RESET),
+    "%s/button/%s_reset/config",           HA_DISCOVERY_PREFIX, SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -998,7 +1008,31 @@ void publishDiscovery() {
   mqtt.publish(DISC_TS, payload, true);
   mqtt.loop(); delay(50);
 
-  logf("Discovery — complete\n");
+  // ── Button: Restart ──────────────────────────────────────
+  // Publishes a retained "restart" to CMD_TOPIC when pressed in HA.
+  // The sensor picks this up on its next wake, restarts, then clears it.
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Restart\",\"unique_id\":\"%s_restart\","
+    "\"command_topic\":\"%s\",\"payload_press\":\"restart\","
+    "\"retain\":true,\"device_class\":\"restart\","
+    "\"icon\":\"mdi:restart\",%s}",
+    SENSOR_ID, CMD_TOPIC, device);
+  mqtt.publish(DISC_BTN_RESTART, payload, true);
+  mqtt.loop(); delay(50);
+
+  // ── Button: Reset Config ─────────────────────────────────
+  // Publishes a retained "reset" to CMD_TOPIC when pressed in HA.
+  // The sensor clears NVS and opens the captive portal on next wake.
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Reset Config\",\"unique_id\":\"%s_reset\","
+    "\"command_topic\":\"%s\",\"payload_press\":\"reset\","
+    "\"retain\":true,"
+    "\"icon\":\"mdi:restore\",%s}",
+    SENSOR_ID, CMD_TOPIC, device);
+  mqtt.publish(DISC_BTN_RESET, payload, true);
+  mqtt.loop(); delay(50);
+
+  logf("Discovery — complete (sensors + buttons)\n");
 }
 
 // ═══════════════════════════════════════════════════════════
