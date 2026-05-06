@@ -10,6 +10,16 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.3.0
+//  - HA MQTT autodiscovery: Restart and Reset Config button entities
+//    appear automatically in the device card in Home Assistant
+//  - Syslog: hostname resolved once at startup with 3 s timeout;
+//    uses pre-resolved IPAddress for all sends (no per-packet DNS blocking);
+//    syslog disabled for the cycle if DNS fails — no startup delay
+//  - Portal input validation: octet range (0-255), port range (1–65535),
+//    string length caps, control-character rejection, hostname/IP format
+//    checks on mqttBroker and syslogHost; specific error message shown
+//
 //  v2.2.0
 //  - saveConfig() takes Config struct (was 24 params)
 //  - IP addresses stored as 4-byte NVS blocks (auto-migrates old per-octet keys)
@@ -35,7 +45,7 @@
 //  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
 
-#define FIRMWARE_VERSION "2.2.0"
+#define FIRMWARE_VERSION "2.3.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -59,6 +69,10 @@ const int BOOT_HOLD_MS       = 3000;
 const int REED_HOLD_MS       = 3000;
 const int NTP_TIMEOUT_MS     = 10000;
 const int CMD_LISTEN_MS      = 2000;
+const int WIFI_TIMEOUT_MS    = 10000;  // max time waiting for WiFi association
+const int MQTT_TIMEOUT_S     =     5;  // TCP socket timeout per connect attempt
+const int FOTA_VERSION_TIMEOUT_MS = 8000;   // version.txt HTTP fetch
+const int FOTA_DL_TIMEOUT_MS      = 60000;  // firmware.bin download (large file)
 
 // ── AP credentials ────────────────────────────────────────
 const char* AP_PASSWORD      = "moisture";
@@ -191,6 +205,8 @@ char DISC_MOISTURE[128];
 char DISC_BAT_V[128];
 char DISC_BAT_PCT[128];
 char DISC_TS[128];
+char DISC_BTN_RESTART[128];
+char DISC_BTN_RESET[128];
 
 void buildDerivedConfig() {
   snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.sensorNumber);
@@ -198,13 +214,17 @@ void buildDerivedConfig() {
   snprintf(STATE_TOPIC, sizeof(STATE_TOPIC), "garden/%s/state",           SENSOR_ID);
   snprintf(CMD_TOPIC,   sizeof(CMD_TOPIC),   "garden/%s/cmd",             SENSOR_ID);
   snprintf(DISC_MOISTURE, sizeof(DISC_MOISTURE),
-    "%s/sensor/%s_moisture/config",    HA_DISCOVERY_PREFIX, SENSOR_ID);
+    "%s/sensor/%s_moisture/config",        HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BAT_V, sizeof(DISC_BAT_V),
-    "%s/sensor/%s_battery_v/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
+    "%s/sensor/%s_battery_v/config",       HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BAT_PCT, sizeof(DISC_BAT_PCT),
-    "%s/sensor/%s_battery_pct/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+    "%s/sensor/%s_battery_pct/config",     HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_TS, sizeof(DISC_TS),
-    "%s/sensor/%s_ts/config",          HA_DISCOVERY_PREFIX, SENSOR_ID);
+    "%s/sensor/%s_ts/config",              HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_BTN_RESTART, sizeof(DISC_BTN_RESTART),
+    "%s/button/%s_restart/config",         HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_BTN_RESET, sizeof(DISC_BTN_RESET),
+    "%s/button/%s_reset/config",           HA_DISCOVERY_PREFIX, SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -224,9 +244,10 @@ struct SyslogEntry {
 };
 
 static SyslogEntry syslogBuf[SYSLOG_LINES];
-static int  syslogHead  = 0;
-static int  syslogTotal = 0;
-static bool syslogReady = false;
+static int       syslogHead  = 0;
+static int       syslogTotal = 0;
+static bool      syslogReady = false;
+static IPAddress syslogIP;          // resolved once in syslogFlush(); used by syslogSend()
 
 WiFiUDP syslogUdp;
 
@@ -253,13 +274,32 @@ void syslogSend(const char* func, const char* msg) {
   snprintf(packet, sizeof(packet), "<134>%s %s moisture-sensor-esp32[%s]: %s",
     timestamp, hostname, func, clean);
 
-  syslogUdp.beginPacket(cfg.syslogHost, cfg.syslogPort);
+  // Use pre-resolved IPAddress — beginPacket(IPAddress) never blocks
+  syslogUdp.beginPacket(syslogIP, cfg.syslogPort);
   syslogUdp.print(packet);
   syslogUdp.endPacket();
 }
 
 void syslogFlush() {
   if (strlen(cfg.syslogHost) == 0) { syslogReady = true; return; }
+
+  // Resolve syslog host → IP once per cycle so syslogSend() can use
+  // beginPacket(IPAddress) — which never blocks — instead of beginPacket(hostname).
+  //
+  // Try numeric IP first (instant, no DNS).  Fall back to hostByName() only if
+  // needed; lwIP's internal DNS timeout is ~4 s so this blocks at most once per
+  // wake cycle rather than on every log call.
+  if (!syslogIP.fromString(cfg.syslogHost)) {
+    if (WiFi.hostByName(cfg.syslogHost, syslogIP) != 1) {
+      // Mark ready + IP=0 before logf() so the message goes to serial only
+      syslogReady = true;
+      syslogHead  = 0;
+      syslogTotal = 0;
+      logf("DNS failed for '%s' — syslog disabled this cycle\n", cfg.syslogHost);
+      return;
+    }
+  }
+
   int count = min(syslogTotal, SYSLOG_LINES);
   int start = (syslogTotal >= SYSLOG_LINES) ? syslogHead : 0;
   for (int i = 0; i < count; i++) {
@@ -278,9 +318,12 @@ void _logf(const char* func, const char* fmt, ...) {
   va_start(args, fmt);
   vsnprintf(line, sizeof(line), fmt, args);
   va_end(args);
-  Serial.print(line);
+  Serial.printf("[%s] %s", func, line);
 
+  // Skip syslog if not configured, or if DNS resolution failed this cycle
+  // (syslogIP == 0 means either not yet resolved or resolution failed)
   if (strlen(cfg.syslogHost) == 0) return;
+  if (syslogReady && (uint32_t)syslogIP == 0) return;
 
   char sysline[SYSLOG_LINE];
   strlcpy(sysline, line, sizeof(sysline));
@@ -306,6 +349,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Moisture Sensor Setup</title>
 <style>
@@ -449,6 +493,10 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
       Syslog add-on.</p>
   </div>
 
+  <div id="err" style="display:none;background:#fde8e8;border:1px solid #c0392b;
+    border-radius:8px;padding:12px 16px;margin-top:12px;color:#c0392b;
+    font-size:.9em;font-weight:600"></div>
+
   <button type="submit">Save &amp; Restart</button>
 </form>
 
@@ -473,13 +521,75 @@ function toggleNet(cb) {
     cb.checked ? 'block' : 'none';
   if (cb.checked) syncNet();
 }
-document.querySelector('form').addEventListener('submit', function(e) {
-  var h = document.getElementById('syslogHost').value.trim();
-  if (h.length > 0 && h.indexOf('.') === -1) {
-    e.preventDefault();
-    alert('Syslog server must be an IP address or FQDN (must contain a dot), or leave blank to disable.');
+function isValidIP(s) {
+  var dots = (s.match(/\./g)||[]).length;
+  if (dots !== 3) return false;
+  var p = s.split('.');
+  if (p.length !== 4) return false;
+  return p.every(function(o) {
+    return /^\d+$/.test(o) && parseInt(o,10) >= 0 && parseInt(o,10) <= 255;
+  });
+}
+function isValidHost(s) {
+  if (!s || !s.length) return false;
+  if (s.indexOf('.') === -1) return false;
+  if (!/^[A-Za-z0-9.\-]+$/.test(s)) return false;
+  if (s[0]==='.' || s[0]==='-' || s[s.length-1]==='.' || s[s.length-1]==='-') return false;
+  if (/^[\d.]+$/.test(s)) return isValidIP(s);
+  return true;
+}
+function v(id) {
+  var el = document.querySelector('[name="'+id+'"]');
+  return el ? el.value.trim() : '';
+}
+function fail(e, msg) {
+  var el = document.getElementById('err');
+  el.textContent = msg;
+  el.style.display = 'block';
+  el.scrollIntoView({behavior:'smooth', block:'center'});
+  e.preventDefault();
+}
+function validateForm(e) {
+  document.getElementById('err').style.display = 'none';
+  var n = parseInt(v('sensorNum'),10);
+  if (isNaN(n)||n<1||n>254)
+    return fail(e, 'Sensor number must be between 1 and 254.');
+  if (!v('ssid'))
+    return fail(e, 'WiFi SSID is required.');
+  if (v('ssid').length>63)
+    return fail(e, 'WiFi SSID is too long (max 63 characters).');
+  if (v('wifiPass').length>63)
+    return fail(e, 'WiFi password is too long (max 63 characters).');
+  if (document.querySelector('[name="staticIP"]').checked) {
+    var ipGroups=['ip','gw','sn','dns'];
+    for (var i=0;i<ipGroups.length;i++) {
+      for (var j=1;j<=4;j++) {
+        var val=parseInt(v(ipGroups[i]+j),10);
+        if (isNaN(val)||val<0||val>255)
+          return fail(e, 'IP field '+ipGroups[i]+j+' must be 0-255.');
+      }
+    }
   }
-});
+  var broker = v('mqttBroker');
+  if (!broker)
+    return fail(e, 'MQTT broker address is required.');
+  if (!isValidHost(broker))
+    return fail(e, 'MQTT broker must be a valid IP address or fully-qualified hostname (e.g. 192.168.1.1 or mqtt.local). Invalid value: "' + broker + '"');
+  var mp = parseInt(v('mqttPort'),10);
+  if (v('mqttPort') && (isNaN(mp)||mp<1||mp>65535))
+    return fail(e, 'MQTT port must be between 1 and 65535.');
+  if (v('mqttUser').length>31)
+    return fail(e, 'MQTT username is too long (max 31 characters).');
+  if (v('mqttPass').length>63)
+    return fail(e, 'MQTT password is too long (max 63 characters).');
+  var sh = v('syslogHost');
+  if (sh.length>0 && !isValidHost(sh))
+    return fail(e, 'Syslog host must be a valid IP address or fully-qualified hostname (e.g. 192.168.1.10 or logs.local). Invalid value: "' + sh + '"');
+  var sp = parseInt(v('syslogPort'),10);
+  if (v('syslogPort') && (isNaN(sp)||sp<1||sp>65535))
+    return fail(e, 'Syslog port must be between 1 and 65535.');
+}
+document.querySelector('form').addEventListener('submit', validateForm);
 </script>
 </body>
 </html>
@@ -505,25 +615,168 @@ const char SAVED_HTML[] PROGMEM = R"rawhtml(
 </html>
 )rawhtml";
 
-const char ERROR_HTML[] PROGMEM = R"rawhtml(
-<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Invalid input</title>
-<style>
-  body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:0 16px;
-    text-align:center;background:#f5f5f5}
-  h1{color:#c0392b}p{color:#555}a{color:#2c7a4b}
-</style>
-</head>
-<body>
-<h1>Invalid input</h1>
-<p>Sensor number must be 1–254. WiFi SSID and MQTT broker address are required.</p>
-<p><a href="/">Go back</a></p>
-</body>
-</html>
-)rawhtml";
+// Error page is generated dynamically so the specific reason can be shown.
+
+// ═══════════════════════════════════════════════════════════
+//  INPUT VALIDATION HELPERS
+// ═══════════════════════════════════════════════════════════
+
+// Returns true if the string contains any ASCII control character (< 0x20 or DEL).
+static bool hasControlChars(const String& s) {
+  for (int i = 0; i < (int)s.length(); i++) {
+    uint8_t c = (uint8_t)s[i];
+    if (c < 0x20 || c == 0x7F) return true;
+  }
+  return false;
+}
+
+// Returns true if every character is valid in a hostname or IP address: [A-Za-z0-9.-]
+static bool isValidHostChars(const String& s) {
+  for (int i = 0; i < (int)s.length(); i++) {
+    char c = s[i];
+    if (!isalnum((uint8_t)c) && c != '.' && c != '-') return false;
+  }
+  return true;
+}
+
+// Validates a hostname/IP string: non-empty, valid chars, contains a dot,
+// doesn't start or end with a dot or hyphen.
+// If the string contains only digits and dots it is treated as an IPv4
+// address and validated with IPAddress.fromString() — catches 999.999.999.999 etc.
+static String validateHost(const String& s, const char* label) {
+  if (s.length() == 0)           return String(label) + " is required.";
+  if (s.length() > 63)           return String(label) + " is too long (max 63 characters).";
+  if (!isValidHostChars(s))      return String(label) + " contains invalid characters — use only letters, digits, hyphens and dots.";
+  if (s.indexOf('.') == -1)      return String(label) + " must be an IP address or fully-qualified hostname (e.g. 192.168.1.1 or mqtt.local).";
+  if (s[0] == '.' || s[0] == '-')
+    return String(label) + " must not start with a dot or hyphen.";
+  if (s[s.length()-1] == '.' || s[s.length()-1] == '-')
+    return String(label) + " must not end with a dot or hyphen.";
+
+  // If every character is a digit or dot, validate strictly as IPv4.
+  // We do NOT use IPAddress::fromString() here because LWIP accepts non-standard
+  // short forms like "999.999" (BSD two-part notation) as valid.
+  // Instead: count dots (must be exactly 3), then check each octet is 0-255.
+  bool looksLikeIP = true;
+  for (int i = 0; i < (int)s.length(); i++) {
+    if (!isdigit((uint8_t)s[i]) && s[i] != '.') { looksLikeIP = false; break; }
+  }
+  if (looksLikeIP) {
+    // Count dots
+    int dots = 0;
+    for (int i = 0; i < (int)s.length(); i++) if (s[i] == '.') dots++;
+    if (dots != 3)
+      return String(label) + " '" + s + "' is not a valid IPv4 address — must have exactly 4 octets.";
+    // Validate each octet
+    int start = 0;
+    for (int i = 0; i <= (int)s.length(); i++) {
+      if (i == (int)s.length() || s[i] == '.') {
+        String seg = s.substring(start, i);
+        if (seg.length() == 0 || seg.length() > 3)
+          return String(label) + " '" + s + "' — octet '" + seg + "' is invalid.";
+        int val = seg.toInt();
+        if (val < 0 || val > 255)
+          return String(label) + " '" + s + "' — octet " + seg + " must be 0-255.";
+        start = i + 1;
+      }
+    }
+  }
+
+  return "";
+}
+
+// Validates all POST fields from the config form.
+// Returns an empty string on success, or a human-readable error on failure.
+static String validateSave() {
+  // ── Sensor number ───────────────────────────────────────
+  int sensorNum = server.arg("sensorNum").toInt();
+  if (sensorNum < 1 || sensorNum > 254)
+    return "Sensor number must be between 1 and 254.";
+
+  // ── WiFi SSID ───────────────────────────────────────────
+  String ssid = server.arg("ssid");
+  if (ssid.length() == 0)   return "WiFi SSID is required.";
+  if (ssid.length() > 63)   return "WiFi SSID is too long (max 63 characters).";
+
+  // ── WiFi password (optional) ────────────────────────────
+  String wifiPass = server.arg("wifiPass");
+  if (wifiPass.length() > 63)          return "WiFi password is too long (max 63 characters).";
+  if (hasControlChars(wifiPass))       return "WiFi password contains control characters.";
+
+  // ── Static IP octets ────────────────────────────────────
+  if (server.hasArg("staticIP")) {
+    static const char* ipFields[] = {
+      "ip1","ip2","ip3","ip4",
+      "gw1","gw2","gw3","gw4",
+      "sn1","sn2","sn3","sn4",
+      "dns1","dns2","dns3","dns4"
+    };
+    for (int i = 0; i < 16; i++) {
+      String v = server.arg(ipFields[i]);
+      if (v.length() == 0)
+        return String("IP field '") + ipFields[i] + "' is empty.";
+      for (int j = 0; j < (int)v.length(); j++) {
+        if (!isdigit((uint8_t)v[j]))
+          return String("IP field '") + ipFields[i] + "' must be a number (0-255).";
+      }
+      int oct = v.toInt();
+      if (oct < 0 || oct > 255)
+        return String("IP field '") + ipFields[i] + "' must be 0-255 (got " + v + ").";
+    }
+  }
+
+  // ── MQTT broker ─────────────────────────────────────────
+  String err = validateHost(server.arg("mqttBroker"), "MQTT broker");
+  if (err.length()) return err;
+
+  // ── MQTT port ───────────────────────────────────────────
+  String mqttPortStr = server.arg("mqttPort");
+  if (mqttPortStr.length() > 0) {
+    int p = mqttPortStr.toInt();
+    if (p < 1 || p > 65535) return "MQTT port must be between 1 and 65535.";
+  }
+
+  // ── MQTT credentials (optional) ─────────────────────────
+  String mqttUser = server.arg("mqttUser");
+  String mqttPass = server.arg("mqttPass");
+  if (mqttUser.length() > 31)     return "MQTT username is too long (max 31 characters).";
+  if (mqttPass.length() > 63)     return "MQTT password is too long (max 63 characters).";
+  if (hasControlChars(mqttUser))  return "MQTT username contains control characters.";
+  if (hasControlChars(mqttPass))  return "MQTT password contains control characters.";
+
+  // ── Syslog host (optional) ──────────────────────────────
+  String syslogHost = server.arg("syslogHost");
+  if (syslogHost.length() > 0) {
+    err = validateHost(syslogHost, "Syslog host");
+    if (err.length()) return err;
+  }
+
+  // ── Syslog port (optional) ──────────────────────────────
+  String syslogPortStr = server.arg("syslogPort");
+  if (syslogPortStr.length() > 0) {
+    int p = syslogPortStr.toInt();
+    if (p < 1 || p > 65535) return "Syslog port must be between 1 and 65535.";
+  }
+
+  return "";  // all good
+}
+
+// Sends a 400 error page with a specific reason shown to the user.
+static void sendError(const String& reason) {
+  String html =
+    "<!DOCTYPE html><html><head>"
+    "<meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>Invalid input</title>"
+    "<style>body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:0 16px;"
+    "text-align:center;background:#f5f5f5}h1{color:#c0392b}p{color:#555}a{color:#2c7a4b}</style>"
+    "</head><body>"
+    "<h1>Invalid input</h1>"
+    "<p>" + reason + "</p>"
+    "<p><a href=\"/\">Go back</a></p>"
+    "</body></html>";
+  server.send(400, "text/html", html);
+}
 
 // ═══════════════════════════════════════════════════════════
 //  PORTAL HANDLERS
@@ -534,18 +787,13 @@ void handleRoot() {
 }
 
 void handleSave() {
-  int sensorNum = server.arg("sensorNum").toInt();
-
-  String syslogHost = server.arg("syslogHost");
-  bool syslogHostBad = syslogHost.length() > 0 && syslogHost.indexOf('.') == -1;
-
-  if (sensorNum < 1 || sensorNum > 254 ||
-      server.arg("ssid").length() == 0 ||
-      server.arg("mqttBroker").length() == 0 ||
-      syslogHostBad) {
-    server.send_P(400, "text/html", ERROR_HTML);
+  String err = validateSave();
+  if (err.length()) {
+    sendError(err);
     return;
   }
+
+  int sensorNum = server.arg("sensorNum").toInt();
 
   Config c = {};
   c.sensorNumber = sensorNum;
@@ -652,10 +900,12 @@ void checkForUpdate() {
 
   WiFiClientSecure client;
   client.setInsecure();
+  client.setTimeout(FOTA_VERSION_TIMEOUT_MS / 1000);  // WiFiClientSecure uses seconds
 
   HTTPClient http;
   http.begin(client, FOTA_VERSION_URL);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(FOTA_VERSION_TIMEOUT_MS);
   int code = http.GET();
 
   if (code != 200) {
@@ -678,6 +928,9 @@ void checkForUpdate() {
 
   logf("FOTA      — update available: %s -> %s, downloading...\n",
     FIRMWARE_VERSION, remoteVersion.c_str());
+
+  // Fresh client for the binary download — longer timeout for large file
+  client.setTimeout(FOTA_DL_TIMEOUT_MS / 1000);
 
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   httpUpdate.onStart([]() {
@@ -850,11 +1103,11 @@ bool connectWifi() {
   WiFi.begin(cfg.wifiSSID,
     strlen(cfg.wifiPassword) > 0 ? cfg.wifiPassword : nullptr);
 
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - wifiStart < (unsigned long)WIFI_TIMEOUT_MS) {
     delay(500);
     Serial.print(".");
-    attempts++;
   }
   Serial.println();
 
@@ -894,6 +1147,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 void connectMqtt() {
   mqtt.setServer(cfg.mqttBroker, cfg.mqttPort);
   mqtt.setBufferSize(768);
+  mqtt.setSocketTimeout(MQTT_TIMEOUT_S);  // caps TCP connect per attempt
   mqtt.setCallback(mqttCallback);
   String clientId = String("garden-") + SENSOR_ID;
   logf("MQTT      — connecting to %s as %s\n",
@@ -998,7 +1252,31 @@ void publishDiscovery() {
   mqtt.publish(DISC_TS, payload, true);
   mqtt.loop(); delay(50);
 
-  logf("Discovery — complete\n");
+  // ── Button: Restart ──────────────────────────────────────
+  // Publishes a retained "restart" to CMD_TOPIC when pressed in HA.
+  // The sensor picks this up on its next wake, restarts, then clears it.
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Restart\",\"unique_id\":\"%s_restart\","
+    "\"command_topic\":\"%s\",\"payload_press\":\"restart\","
+    "\"retain\":true,\"device_class\":\"restart\","
+    "\"icon\":\"mdi:restart\",%s}",
+    SENSOR_ID, CMD_TOPIC, device);
+  mqtt.publish(DISC_BTN_RESTART, payload, true);
+  mqtt.loop(); delay(50);
+
+  // ── Button: Reset Config ─────────────────────────────────
+  // Publishes a retained "reset" to CMD_TOPIC when pressed in HA.
+  // The sensor clears NVS and opens the captive portal on next wake.
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Reset Config\",\"unique_id\":\"%s_reset\","
+    "\"command_topic\":\"%s\",\"payload_press\":\"reset\","
+    "\"retain\":true,"
+    "\"icon\":\"mdi:restore\",%s}",
+    SENSOR_ID, CMD_TOPIC, device);
+  mqtt.publish(DISC_BTN_RESET, payload, true);
+  mqtt.loop(); delay(50);
+
+  logf("Discovery — complete (sensors + buttons)\n");
 }
 
 // ═══════════════════════════════════════════════════════════
