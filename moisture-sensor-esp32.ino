@@ -45,7 +45,7 @@
 //  - All settings stored in NVS
 // ═══════════════════════════════════════════════════════════
 
-#define FIRMWARE_VERSION "2.3.0-dev"
+#define FIRMWARE_VERSION "2.3.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
