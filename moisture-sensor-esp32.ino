@@ -284,11 +284,11 @@ void syslogFlush() {
   // wake cycle rather than on every log call.
   if (!syslogIP.fromString(cfg.syslogHost)) {
     if (WiFi.hostByName(cfg.syslogHost, syslogIP) != 1) {
-      Serial.printf("[syslogFlush] DNS failed for '%s' — syslog disabled this cycle\n",
-        cfg.syslogHost);
-      syslogReady = true;   // prevent _logf() from continuing to queue messages
+      // Mark ready + IP=0 before logf() so the message goes to serial only
+      syslogReady = true;
       syslogHead  = 0;
       syslogTotal = 0;
+      logf("DNS failed for '%s' — syslog disabled this cycle\n", cfg.syslogHost);
       return;
     }
   }
@@ -311,7 +311,7 @@ void _logf(const char* func, const char* fmt, ...) {
   va_start(args, fmt);
   vsnprintf(line, sizeof(line), fmt, args);
   va_end(args);
-  Serial.print(line);
+  Serial.printf("[%s] %s", func, line);
 
   // Skip syslog if not configured, or if DNS resolution failed this cycle
   // (syslogIP == 0 means either not yet resolved or resolution failed)
