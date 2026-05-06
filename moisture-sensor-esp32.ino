@@ -570,6 +570,8 @@ static bool isValidHostChars(const String& s) {
 
 // Validates a hostname/IP string: non-empty, valid chars, contains a dot,
 // doesn't start or end with a dot or hyphen.
+// If the string contains only digits and dots it is treated as an IPv4
+// address and validated with IPAddress.fromString() — catches 999.999.999.999 etc.
 static String validateHost(const String& s, const char* label) {
   if (s.length() == 0)           return String(label) + " is required.";
   if (s.length() > 63)           return String(label) + " is too long (max 63 characters).";
@@ -579,6 +581,18 @@ static String validateHost(const String& s, const char* label) {
     return String(label) + " must not start with a dot or hyphen.";
   if (s[s.length()-1] == '.' || s[s.length()-1] == '-')
     return String(label) + " must not end with a dot or hyphen.";
+
+  // If every character is a digit or dot, it must be a valid IPv4 address.
+  bool looksLikeIP = true;
+  for (int i = 0; i < (int)s.length(); i++) {
+    if (!isdigit((uint8_t)s[i]) && s[i] != '.') { looksLikeIP = false; break; }
+  }
+  if (looksLikeIP) {
+    IPAddress ip;
+    if (!ip.fromString(s))
+      return String(label) + " '" + s + "' is not a valid IP address (each octet must be 0–255).";
+  }
+
   return "";
 }
 
