@@ -69,6 +69,10 @@ const int BOOT_HOLD_MS       = 3000;
 const int REED_HOLD_MS       = 3000;
 const int NTP_TIMEOUT_MS     = 10000;
 const int CMD_LISTEN_MS      = 2000;
+const int WIFI_TIMEOUT_MS    = 10000;  // max time waiting for WiFi association
+const int MQTT_TIMEOUT_S     =     5;  // TCP socket timeout per connect attempt
+const int FOTA_VERSION_TIMEOUT_MS = 8000;   // version.txt HTTP fetch
+const int FOTA_DL_TIMEOUT_MS      = 60000;  // firmware.bin download (large file)
 
 // ── AP credentials ────────────────────────────────────────
 const char* AP_PASSWORD      = "moisture";
@@ -861,10 +865,12 @@ void checkForUpdate() {
 
   WiFiClientSecure client;
   client.setInsecure();
+  client.setTimeout(FOTA_VERSION_TIMEOUT_MS / 1000);  // WiFiClientSecure uses seconds
 
   HTTPClient http;
   http.begin(client, FOTA_VERSION_URL);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(FOTA_VERSION_TIMEOUT_MS);
   int code = http.GET();
 
   if (code != 200) {
@@ -887,6 +893,9 @@ void checkForUpdate() {
 
   logf("FOTA      — update available: %s -> %s, downloading...\n",
     FIRMWARE_VERSION, remoteVersion.c_str());
+
+  // Fresh client for the binary download — longer timeout for large file
+  client.setTimeout(FOTA_DL_TIMEOUT_MS / 1000);
 
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   httpUpdate.onStart([]() {
@@ -1059,11 +1068,11 @@ bool connectWifi() {
   WiFi.begin(cfg.wifiSSID,
     strlen(cfg.wifiPassword) > 0 ? cfg.wifiPassword : nullptr);
 
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - wifiStart < (unsigned long)WIFI_TIMEOUT_MS) {
     delay(500);
     Serial.print(".");
-    attempts++;
   }
   Serial.println();
 
@@ -1103,6 +1112,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 void connectMqtt() {
   mqtt.setServer(cfg.mqttBroker, cfg.mqttPort);
   mqtt.setBufferSize(768);
+  mqtt.setSocketTimeout(MQTT_TIMEOUT_S);  // caps TCP connect per attempt
   mqtt.setCallback(mqttCallback);
   String clientId = String("garden-") + SENSOR_ID;
   logf("MQTT      — connecting to %s as %s\n",
