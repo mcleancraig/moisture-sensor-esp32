@@ -1509,12 +1509,14 @@ void publishConfigDiscovery() {
   char payload[640];
 
   // ── Text: MQTT Broker ────────────────────────────────────
+  // "retain":true tells HA to publish commands as retained so sleeping
+  // sensors receive them on their next wake cycle when they subscribe.
   snprintf(payload, sizeof(payload),
     "{\"name\":\"MQTT Broker\",\"unique_id\":\"%s_cfg_mqtt_broker\","
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttBroker }}\","
     "\"command_topic\":\"%s\","
     "\"command_template\":\"{\\\"mqttBroker\\\": \\\"{{ value }}\\\"}\","
-    "\"max\":63,%s}",
+    "\"retain\":true,\"max\":63,%s}",
     SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
   mqtt.publish(DISC_CFG_MQTT_BROKER, payload, true);
   mqtt.loop(); delay(50);
@@ -1525,7 +1527,7 @@ void publishConfigDiscovery() {
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPort }}\","
     "\"command_topic\":\"%s\","
     "\"command_template\":\"{\\\"mqttPort\\\": {{ value | int }}}\","
-    "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
+    "\"retain\":true,\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
     SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
   mqtt.publish(DISC_CFG_MQTT_PORT, payload, true);
   mqtt.loop(); delay(50);
@@ -1536,7 +1538,7 @@ void publishConfigDiscovery() {
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttUser }}\","
     "\"command_topic\":\"%s\","
     "\"command_template\":\"{\\\"mqttUser\\\": \\\"{{ value }}\\\"}\","
-    "\"max\":31,%s}",
+    "\"retain\":true,\"max\":31,%s}",
     SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
   mqtt.publish(DISC_CFG_MQTT_USER, payload, true);
   mqtt.loop(); delay(50);
@@ -1547,7 +1549,7 @@ void publishConfigDiscovery() {
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPassword }}\","
     "\"command_topic\":\"%s\","
     "\"command_template\":\"{\\\"mqttPassword\\\": \\\"{{ value }}\\\"}\","
-    "\"max\":63,%s}",
+    "\"retain\":true,\"max\":63,%s}",
     SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
   mqtt.publish(DISC_CFG_MQTT_PASS, payload, true);
   mqtt.loop(); delay(50);
@@ -1558,7 +1560,7 @@ void publishConfigDiscovery() {
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogHost }}\","
     "\"command_topic\":\"%s\","
     "\"command_template\":\"{\\\"syslogHost\\\": \\\"{{ value }}\\\"}\","
-    "\"max\":63,%s}",
+    "\"retain\":true,\"max\":63,%s}",
     SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
   mqtt.publish(DISC_CFG_SYSLOG_HOST, payload, true);
   mqtt.loop(); delay(50);
@@ -1569,7 +1571,7 @@ void publishConfigDiscovery() {
     "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogPort }}\","
     "\"command_topic\":\"%s\","
     "\"command_template\":\"{\\\"syslogPort\\\": {{ value | int }}}\","
-    "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
+    "\"retain\":true,\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
     SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_TOPIC, device);
   mqtt.publish(DISC_CFG_SYSLOG_PORT, payload, true);
   mqtt.loop(); delay(50);
