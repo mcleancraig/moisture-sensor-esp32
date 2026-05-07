@@ -10,6 +10,11 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.5.0
+//  - Configurable GPIO pins: moisturePin, batteryPin, reedPin stored in NVS
+//    with safe defaults (0, 1, 3); settable via captive portal Advanced
+//    section and MQTT remote config — accommodates hardware variations
+//
 //  v2.4.1
 //  - Battery curve recalibrated: 3.25 V is now 0% (was 10%) based on
 //    real-world observation that sensors go offline before reaching the
@@ -64,7 +69,7 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.4.1"
+#define FIRMWARE_VERSION "2.5.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -134,6 +139,10 @@ struct Config {
   char    mqttPassword[64];
   char    syslogHost[64];
   int     syslogPort;
+  // GPIO pin assignments — configurable to accommodate hardware variations
+  int     moisturePin;   // default 0  (A0/GPIO0)
+  int     batteryPin;    // default 1  (A1/GPIO1)
+  int     reedPin;       // default 3  (D3/GPIO3)
 } cfg;
 
 struct MoistureReading {
@@ -175,7 +184,11 @@ void loadConfig() {
   prefs.getString("mqttPass",   cfg.mqttPassword,sizeof(cfg.mqttPassword));
 
   prefs.getString("syslogHost", cfg.syslogHost, sizeof(cfg.syslogHost));
-  cfg.syslogPort = prefs.getInt("syslogPort", 514);
+  cfg.syslogPort  = prefs.getInt("syslogPort",  514);
+
+  cfg.moisturePin = prefs.getInt("moisturePin", 0);
+  cfg.batteryPin  = prefs.getInt("batteryPin",  1);
+  cfg.reedPin     = prefs.getInt("reedPin",     3);
 
   prefs.end();
 
@@ -209,6 +222,9 @@ void saveConfig(const Config& c) {
   prefs.putString("mqttPass",   c.mqttPassword);
   prefs.putString("syslogHost", c.syslogHost);
   prefs.putInt("syslogPort",    c.syslogPort);
+  prefs.putInt("moisturePin",   c.moisturePin);
+  prefs.putInt("batteryPin",    c.batteryPin);
+  prefs.putInt("reedPin",       c.reedPin);
   prefs.end();
   logf("Config    — saved to NVS\n");
 }
@@ -228,6 +244,7 @@ char DISC_TS[128];
 char DISC_BTN_RESTART[128];
 char DISC_BTN_RESET[128];
 char DISC_BAT_LOW[128];
+char DISC_FW[128];
 char CONFIG_SET_PREFIX[80];   // garden/sensorN/config/set  (subscribe as .../+)
 char CONFIG_STATE_TOPIC[80];  // garden/sensorN/config/state
 char DISC_CFG_MQTT_BROKER[128];
@@ -236,6 +253,9 @@ char DISC_CFG_MQTT_USER[128];
 char DISC_CFG_MQTT_PASS[128];
 char DISC_CFG_SYSLOG_HOST[128];
 char DISC_CFG_SYSLOG_PORT[128];
+char DISC_CFG_MOISTURE_PIN[128];
+char DISC_CFG_BATTERY_PIN[128];
+char DISC_CFG_REED_PIN[128];
 
 void buildDerivedConfig() {
   snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.sensorNumber);
@@ -256,6 +276,8 @@ void buildDerivedConfig() {
     "%s/button/%s_reset/config",             HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BAT_LOW, sizeof(DISC_BAT_LOW),
     "%s/binary_sensor/%s_battery_low/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_FW, sizeof(DISC_FW),
+    "%s/sensor/%s_fw/config",                 HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(CONFIG_SET_PREFIX,  sizeof(CONFIG_SET_PREFIX),  "garden/%s/config/set",    SENSOR_ID);
   snprintf(CONFIG_STATE_TOPIC, sizeof(CONFIG_STATE_TOPIC), "garden/%s/config/state",  SENSOR_ID);
   snprintf(DISC_CFG_MQTT_BROKER, sizeof(DISC_CFG_MQTT_BROKER),
@@ -270,6 +292,12 @@ void buildDerivedConfig() {
     "%s/text/%s_cfg_syslog_host/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_SYSLOG_PORT, sizeof(DISC_CFG_SYSLOG_PORT),
     "%s/number/%s_cfg_syslog_port/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_CFG_MOISTURE_PIN, sizeof(DISC_CFG_MOISTURE_PIN),
+    "%s/number/%s_cfg_moisture_pin/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_CFG_BATTERY_PIN, sizeof(DISC_CFG_BATTERY_PIN),
+    "%s/number/%s_cfg_battery_pin/config",  HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_CFG_REED_PIN, sizeof(DISC_CFG_REED_PIN),
+    "%s/number/%s_cfg_reed_pin/config",     HA_DISCOVERY_PREFIX, SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -538,6 +566,30 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
       Syslog add-on.</p>
   </div>
 
+  <details style="margin:16px 0">
+    <summary style="font-weight:600;font-size:.95em;color:#555;cursor:pointer;
+      padding:10px 14px;background:#fff;border-radius:8px;
+      box-shadow:0 1px 4px rgba(0,0,0,.08);list-style:none">
+      &#9654; Advanced — GPIO pin assignments
+    </summary>
+    <div class="section" style="margin-top:0;border-top-left-radius:0;border-top-right-radius:0">
+      <p class="hint" style="margin-top:0">Change only if your hardware uses different pins than the defaults.
+        All three pins must be different. Valid range: 0–10 (XIAO GPIO numbers).</p>
+      <label>Moisture sensor pin
+        <input type="number" name="moisturePin" value="0" min="0" max="10">
+      </label>
+      <p class="hint">Default: 0 (A0/GPIO0)</p>
+      <label>Battery voltage pin
+        <input type="number" name="batteryPin" value="1" min="0" max="10">
+      </label>
+      <p class="hint">Default: 1 (A1/GPIO1)</p>
+      <label>Reed switch pin
+        <input type="number" name="reedPin" value="3" min="0" max="10">
+      </label>
+      <p class="hint">Default: 3 (D3/GPIO3)</p>
+    </div>
+  </details>
+
   <div id="err" style="display:none;background:#fde8e8;border:1px solid #c0392b;
     border-radius:8px;padding:12px 16px;margin-top:12px;color:#c0392b;
     font-size:.9em;font-weight:600"></div>
@@ -633,6 +685,14 @@ function validateForm(e) {
   var sp = parseInt(v('syslogPort'),10);
   if (v('syslogPort') && (isNaN(sp)||sp<1||sp>65535))
     return fail(e, 'Syslog port must be between 1 and 65535.');
+  var mPin = parseInt(v('moisturePin'),10);
+  var bPin = parseInt(v('batteryPin'),10);
+  var rPin = parseInt(v('reedPin'),10);
+  if (isNaN(mPin)||mPin<0||mPin>10) return fail(e, 'Moisture pin must be between 0 and 10.');
+  if (isNaN(bPin)||bPin<0||bPin>10) return fail(e, 'Battery pin must be between 0 and 10.');
+  if (isNaN(rPin)||rPin<0||rPin>10) return fail(e, 'Reed switch pin must be between 0 and 10.');
+  if (mPin===bPin||mPin===rPin||bPin===rPin)
+    return fail(e, 'Moisture, battery and reed switch pins must all be different.');
 }
 document.querySelector('form').addEventListener('submit', validateForm);
 </script>
@@ -803,6 +863,16 @@ static String validateSave() {
     if (p < 1 || p > 65535) return "Syslog port must be between 1 and 65535.";
   }
 
+  // ── GPIO pin assignments ─────────────────────────────────
+  int mPin = server.arg("moisturePin").toInt();
+  int bPin = server.arg("batteryPin").toInt();
+  int rPin = server.arg("reedPin").toInt();
+  if (mPin < 0 || mPin > 10) return "Moisture pin must be between 0 and 10.";
+  if (bPin < 0 || bPin > 10) return "Battery pin must be between 0 and 10.";
+  if (rPin < 0 || rPin > 10) return "Reed switch pin must be between 0 and 10.";
+  if (mPin == bPin || mPin == rPin || bPin == rPin)
+    return "Moisture, battery and reed switch pins must all be different.";
+
   return "";  // all good
 }
 
@@ -871,6 +941,10 @@ void handleSave() {
   strlcpy(c.syslogHost, server.arg("syslogHost").c_str(), sizeof(c.syslogHost));
   c.syslogPort = server.arg("syslogPort").toInt();
   if (c.syslogPort == 0) c.syslogPort = 514;
+
+  c.moisturePin = server.arg("moisturePin").toInt();
+  c.batteryPin  = server.arg("batteryPin").toInt();
+  c.reedPin     = server.arg("reedPin").toInt();
 
   saveConfig(c);
 
@@ -1045,15 +1119,15 @@ void getTimestamp(char* buf, size_t len) {
 // ═══════════════════════════════════════════════════════════
 
 void checkReedSwitch() {
-  pinMode(REED_PIN, INPUT_PULLUP);
+  pinMode(cfg.reedPin, INPUT_PULLUP);
   delay(50);
 
-  if (digitalRead(REED_PIN) == LOW) {
+  if (digitalRead(cfg.reedPin) == LOW) {
     logf("Reed      — magnet detected, waiting to confirm...\n");
     unsigned long holdStart  = millis();
     bool          restartArmed = false;
 
-    while (digitalRead(REED_PIN) == LOW) {
+    while (digitalRead(cfg.reedPin) == LOW) {
       unsigned long held = millis() - holdStart;
 
       if (held >= REED_RESET_MS) {
@@ -1095,11 +1169,11 @@ void goToSleep() {
 }
 
 MoistureReading readMoisture() {
-  analogSetPinAttenuation(MOISTURE_PIN, ADC_11db);
+  analogSetPinAttenuation(cfg.moisturePin, ADC_11db);
   delay(500);
   long sum = 0;
   for (int i = 0; i < 10; i++) {
-    sum += analogReadMilliVolts(MOISTURE_PIN);
+    sum += analogReadMilliVolts(cfg.moisturePin);
     delay(10);
   }
   MoistureReading r;
@@ -1113,7 +1187,7 @@ float readBatteryVoltage(int &rawMv) {
   delay(10);
   long sum = 0;
   for (int i = 0; i < 16; i++) {
-    sum += analogReadMilliVolts(BATTERY_PIN);
+    sum += analogReadMilliVolts(cfg.batteryPin);
     delay(5);
   }
   rawMv = sum / 16;
@@ -1205,13 +1279,19 @@ static char pendingMqttUser[32]      = "";
 static char pendingMqttPassword[64]  = "";
 static char pendingSyslogHost[64]    = "";
 static char pendingSyslogPort[8]     = "";
-static uint8_t pendingFields         = 0;   // bitmask — which fields arrived this cycle
+static char pendingMoisturePin[4]    = "";
+static char pendingBatteryPin[4]     = "";
+static char pendingReedPin[4]        = "";
+static uint16_t pendingFields        = 0;   // bitmask — which fields arrived this cycle
 #define PF_MQTT_BROKER    (1<<0)
 #define PF_MQTT_PORT      (1<<1)
 #define PF_MQTT_USER      (1<<2)
 #define PF_MQTT_PASSWORD  (1<<3)
 #define PF_SYSLOG_HOST    (1<<4)
 #define PF_SYSLOG_PORT    (1<<5)
+#define PF_MOISTURE_PIN   (1<<6)
+#define PF_BATTERY_PIN    (1<<7)
+#define PF_REED_PIN       (1<<8)
 
 // ── IMPORTANT: callback safety rules ────────────────────────
 // PubSubClient passes topic and payload as pointers INTO its internal buffer.
@@ -1267,6 +1347,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     else if (strcmp(fieldName, "mqttPassword") == 0) { strlcpy(pendingMqttPassword, val, sizeof(pendingMqttPassword)); pendingFields |= PF_MQTT_PASSWORD; }
     else if (strcmp(fieldName, "syslogHost")   == 0) { strlcpy(pendingSyslogHost,   val, sizeof(pendingSyslogHost));   pendingFields |= PF_SYSLOG_HOST;   }
     else if (strcmp(fieldName, "syslogPort")   == 0) { strlcpy(pendingSyslogPort,   val, sizeof(pendingSyslogPort));   pendingFields |= PF_SYSLOG_PORT;   }
+    else if (strcmp(fieldName, "moisturePin")  == 0) { strlcpy(pendingMoisturePin,  val, sizeof(pendingMoisturePin));  pendingFields |= PF_MOISTURE_PIN;  }
+    else if (strcmp(fieldName, "batteryPin")   == 0) { strlcpy(pendingBatteryPin,   val, sizeof(pendingBatteryPin));   pendingFields |= PF_BATTERY_PIN;   }
+    else if (strcmp(fieldName, "reedPin")      == 0) { strlcpy(pendingReedPin,      val, sizeof(pendingReedPin));      pendingFields |= PF_REED_PIN;      }
     // Unknown fields silently ignored
   }
 }
@@ -1406,6 +1489,14 @@ void publishDiscovery() {
   mqtt.publish(DISC_TS, payload, true);
   mqtt.loop(); delay(50);
 
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Firmware Version\",\"unique_id\":\"%s_fw\","
+    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.fw }}\","
+    "\"icon\":\"mdi:chip\",%s}",
+    SENSOR_ID, STATE_TOPIC, device);
+  mqtt.publish(DISC_FW, payload, true);
+  mqtt.loop(); delay(50);
+
   // ── Button: Restart ──────────────────────────────────────
   // Publishes a retained "restart" to CMD_TOPIC when pressed in HA.
   // The sensor picks this up on its next wake, restarts, then clears it.
@@ -1459,10 +1550,12 @@ void publishConfigState() {
   snprintf(payload, sizeof(payload),
     "{\"mqttBroker\":\"%s\",\"mqttPort\":%d,"
     "\"mqttUser\":\"%s\",\"mqttPassword\":\"%s\","
-    "\"syslogHost\":\"%s\",\"syslogPort\":%d}",
+    "\"syslogHost\":\"%s\",\"syslogPort\":%d,"
+    "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d}",
     cfg.mqttBroker, cfg.mqttPort,
     cfg.mqttUser, cfg.mqttPassword,
-    cfg.syslogHost, cfg.syslogPort);
+    cfg.syslogHost, cfg.syslogPort,
+    cfg.moisturePin, cfg.batteryPin, cfg.reedPin);
   mqtt.publish(CONFIG_STATE_TOPIC, payload, true);
   mqtt.loop();
   logf("Config    — state published to %s\n", CONFIG_STATE_TOPIC);
@@ -1486,6 +1579,9 @@ void applyConfigChange() {
     if (pendingFields & PF_MQTT_PASSWORD) { snprintf(t, sizeof(t), "%s/mqttPassword", CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_SYSLOG_HOST)   { snprintf(t, sizeof(t), "%s/syslogHost",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_SYSLOG_PORT)   { snprintf(t, sizeof(t), "%s/syslogPort",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_MOISTURE_PIN)  { snprintf(t, sizeof(t), "%s/moisturePin",  CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_BATTERY_PIN)   { snprintf(t, sizeof(t), "%s/batteryPin",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_REED_PIN)      { snprintf(t, sizeof(t), "%s/reedPin",      CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
   }
 
   bool changed = false;
@@ -1528,6 +1624,27 @@ void applyConfigChange() {
     int p = atoi(pendingSyslogPort);
     if (p < 1 || p > 65535) { logf("Config    — syslogPort rejected: must be 1-65535\n"); }
     else { cfg.syslogPort = p; logf("Config    — syslogPort -> %d\n", p); changed = true; }
+  }
+
+  if (pendingFields & PF_MOISTURE_PIN) {
+    int p = atoi(pendingMoisturePin);
+    if (p < 0 || p > 10) { logf("Config    — moisturePin rejected: must be 0-10\n"); }
+    else if (p == cfg.batteryPin || p == cfg.reedPin) { logf("Config    — moisturePin rejected: conflicts with another pin\n"); }
+    else { cfg.moisturePin = p; logf("Config    — moisturePin -> %d\n", p); changed = true; }
+  }
+
+  if (pendingFields & PF_BATTERY_PIN) {
+    int p = atoi(pendingBatteryPin);
+    if (p < 0 || p > 10) { logf("Config    — batteryPin rejected: must be 0-10\n"); }
+    else if (p == cfg.moisturePin || p == cfg.reedPin) { logf("Config    — batteryPin rejected: conflicts with another pin\n"); }
+    else { cfg.batteryPin = p; logf("Config    — batteryPin -> %d\n", p); changed = true; }
+  }
+
+  if (pendingFields & PF_REED_PIN) {
+    int p = atoi(pendingReedPin);
+    if (p < 0 || p > 10) { logf("Config    — reedPin rejected: must be 0-10\n"); }
+    else if (p == cfg.moisturePin || p == cfg.batteryPin) { logf("Config    — reedPin rejected: conflicts with another pin\n"); }
+    else { cfg.reedPin = p; logf("Config    — reedPin -> %d\n", p); changed = true; }
   }
 
   if (changed) {
@@ -1618,6 +1735,39 @@ void publishConfigDiscovery() {
     "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
     SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
   mqtt.publish(DISC_CFG_SYSLOG_PORT, payload, true);
+  mqtt.loop(); delay(50);
+
+  // ── Number: Moisture Pin ─────────────────────────────────
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Moisture Pin\",\"unique_id\":\"%s_cfg_moisture_pin\","
+    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.moisturePin }}\","
+    "\"command_topic\":\"%s/moisturePin\",\"retain\":true,"
+    "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
+    "\"icon\":\"mdi:water-percent\",%s}",
+    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
+  mqtt.publish(DISC_CFG_MOISTURE_PIN, payload, true);
+  mqtt.loop(); delay(50);
+
+  // ── Number: Battery Pin ──────────────────────────────────
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Battery Pin\",\"unique_id\":\"%s_cfg_battery_pin\","
+    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.batteryPin }}\","
+    "\"command_topic\":\"%s/batteryPin\",\"retain\":true,"
+    "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
+    "\"icon\":\"mdi:battery\",%s}",
+    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
+  mqtt.publish(DISC_CFG_BATTERY_PIN, payload, true);
+  mqtt.loop(); delay(50);
+
+  // ── Number: Reed Switch Pin ──────────────────────────────
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Reed Switch Pin\",\"unique_id\":\"%s_cfg_reed_pin\","
+    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.reedPin }}\","
+    "\"command_topic\":\"%s/reedPin\",\"retain\":true,"
+    "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
+    "\"icon\":\"mdi:magnet\",%s}",
+    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
+  mqtt.publish(DISC_CFG_REED_PIN, payload, true);
   mqtt.loop(); delay(50);
 
   logf("Discovery — config entities published\n");
