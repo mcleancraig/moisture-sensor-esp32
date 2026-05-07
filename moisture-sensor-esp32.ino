@@ -10,6 +10,13 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.4.1
+//  - Battery curve recalibrated: 3.25 V is now 0% (was 10%) based on
+//    real-world observation that sensors go offline before reaching the
+//    old 10% threshold; all other breakpoints rescaled proportionally
+//  - HA low battery binary sensor: autodiscovered entity reports ON when
+//    battery_pct <= 15%, using existing state topic (no new MQTT topic)
+//
 //  v2.4.0
 //  - MQTT remote config: partial JSON updates to garden/sensorN/config/set
 //    apply individual settings (mqttBroker, mqttPort, mqttUser, mqttPassword,
@@ -55,7 +62,7 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.4.0"
+#define FIRMWARE_VERSION "2.4.1-dev.init"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -217,6 +224,7 @@ char DISC_BAT_PCT[128];
 char DISC_TS[128];
 char DISC_BTN_RESTART[128];
 char DISC_BTN_RESET[128];
+char DISC_BAT_LOW[128];
 char CONFIG_SET_PREFIX[80];   // garden/sensorN/config/set  (subscribe as .../+)
 char CONFIG_STATE_TOPIC[80];  // garden/sensorN/config/state
 char DISC_CFG_MQTT_BROKER[128];
@@ -243,6 +251,8 @@ void buildDerivedConfig() {
     "%s/button/%s_restart/config",         HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BTN_RESET, sizeof(DISC_BTN_RESET),
     "%s/button/%s_reset/config",             HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_BAT_LOW, sizeof(DISC_BAT_LOW),
+    "%s/binary_sensor/%s_battery_low/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(CONFIG_SET_PREFIX,  sizeof(CONFIG_SET_PREFIX),  "garden/%s/config/set",    SENSOR_ID);
   snprintf(CONFIG_STATE_TOPIC, sizeof(CONFIG_STATE_TOPIC), "garden/%s/config/state",  SENSOR_ID);
   snprintf(DISC_CFG_MQTT_BROKER, sizeof(DISC_CFG_MQTT_BROKER),
@@ -1096,10 +1106,11 @@ float readBatteryVoltage(int &rawMv) {
 }
 
 int batteryPercent(float voltage) {
-  const float v[] = { 3.00, 3.10, 3.25, 3.50, 3.60,
-                      3.70, 3.80, 3.90, 4.00, 4.10, 4.20 };
-  const int   p[] = {    0,    5,   10,   20,   35,
-                        50,   65,   80,   90,   95,  100 };
+  // Curve anchored at real-world empty (3.25 V = 0%) based on observed field
+  // behaviour: sensors become unreachable before reaching the old 10% threshold.
+  // Rescaled linearly from (old 10%→0%) to (old 100%→100%).
+  const float v[] = { 3.25, 3.50, 3.60, 3.70, 3.80, 3.90, 4.00, 4.10, 4.20 };
+  const int   p[] = {    0,   11,   28,   44,   61,   78,   89,   94,  100 };
   const int   n   = sizeof(v) / sizeof(v[0]);
 
   if (voltage <= v[0])   return 0;
@@ -1347,6 +1358,21 @@ void publishDiscovery() {
     "\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\",%s}",
     SENSOR_ID, STATE_TOPIC, device);
   mqtt.publish(DISC_BAT_PCT, payload, true);
+  mqtt.loop(); delay(50);
+
+  // ── Binary sensor: Low Battery ───────────────────────────
+  // Uses the existing state topic — no extra publish needed.
+  // Reads battery_pct from the JSON and reports ON (low) when <= 15%.
+  // battery_pct is null when a suspicious reading is discarded; treated as
+  // not-low in that case so a bad ADC reading doesn't spam alerts.
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Battery Low\",\"unique_id\":\"%s_battery_low\","
+    "\"state_topic\":\"%s\","
+    "\"value_template\":\"{{ 'ON' if value_json.battery_pct is not none and value_json.battery_pct | int <= 15 else 'OFF' }}\","
+    "\"device_class\":\"battery\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\","
+    "\"icon\":\"mdi:battery-alert\",%s}",
+    SENSOR_ID, STATE_TOPIC, device);
+  mqtt.publish(DISC_BAT_LOW, payload, true);
   mqtt.loop(); delay(50);
 
   snprintf(payload, sizeof(payload),
