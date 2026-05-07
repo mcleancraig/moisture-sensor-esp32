@@ -1204,7 +1204,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     memcpy(cmdPayload, payload, length);
     cmdPayload[length] = '\0';
     cmdReceived = true;
-    mqtt.publish(CMD_TOPIC, "", true);   // clear retained — no mqtt.loop() inside callbacks
+    // DO NOT call mqtt.publish() or mqtt.loop() here.
+    // PubSubClient uses one buffer for both rx and tx. Calling publish() inside
+    // the callback overwrites the buffer mid-read, corrupting internal state and
+    // crashing the next publish() call outside the callback.
+    // CMD_TOPIC retained message is cleared in processMqttCommand() instead.
 
   } else {
     // ── Config update (config/set/<field>) ────────────────
@@ -1212,29 +1216,25 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (strncmp(topic, CONFIG_SET_PREFIX, prefixLen) != 0 ||
         topic[prefixLen] != '/') return;
 
-    // Step 1: copy field name BEFORE mqtt.publish() overwrites the buffer
+    // Copy field name and value — all we do in the callback.
+    // NO mqtt.publish(), NO mqtt.loop(), NO heap allocation (no String objects).
+    // Retained messages are cleared in applyConfigChange() outside the callback.
     char fieldName[32];
     strlcpy(fieldName, topic + prefixLen + 1, sizeof(fieldName));
 
-    // Step 2: copy payload value
     char val[128] = "";
     if (length < sizeof(val)) {
       memcpy(val, payload, length);
       val[length] = '\0';
     }
 
-    // Step 3: clear retained slot — topic pointer is safe to use here because
-    // we already copied everything we need above.
-    mqtt.publish(topic, "", true);   // no mqtt.loop()
-
-    // Step 4: store in pending buffers; validation happens in applyConfigChange()
     if      (strcmp(fieldName, "mqttBroker")   == 0) { strlcpy(pendingMqttBroker,   val, sizeof(pendingMqttBroker));   pendingFields |= PF_MQTT_BROKER;   }
     else if (strcmp(fieldName, "mqttPort")     == 0) { strlcpy(pendingMqttPort,     val, sizeof(pendingMqttPort));     pendingFields |= PF_MQTT_PORT;     }
     else if (strcmp(fieldName, "mqttUser")     == 0) { strlcpy(pendingMqttUser,     val, sizeof(pendingMqttUser));     pendingFields |= PF_MQTT_USER;     }
     else if (strcmp(fieldName, "mqttPassword") == 0) { strlcpy(pendingMqttPassword, val, sizeof(pendingMqttPassword)); pendingFields |= PF_MQTT_PASSWORD; }
     else if (strcmp(fieldName, "syslogHost")   == 0) { strlcpy(pendingSyslogHost,   val, sizeof(pendingSyslogHost));   pendingFields |= PF_SYSLOG_HOST;   }
     else if (strcmp(fieldName, "syslogPort")   == 0) { strlcpy(pendingSyslogPort,   val, sizeof(pendingSyslogPort));   pendingFields |= PF_SYSLOG_PORT;   }
-    // Unknown fields: already cleared above, silently ignored
+    // Unknown fields silently ignored
   }
 }
 
@@ -1277,6 +1277,14 @@ void processMqttCommand() {
   if (!cmdReceived) return;
   cmdReceived = false;
   logf("Command   — received: %s\n", cmdPayload);
+
+  // Clear the retained CMD message from the broker now that we have a local copy.
+  // Safe to publish here — we are outside mqttCallback so the PubSubClient buffer
+  // is not in use by the callback.  Must happen before acting on the command so
+  // a reset/restart doesn't leave a stale retained "reset"/"restart" on the broker
+  // that would fire again on the next boot.
+  mqtt.publish(CMD_TOPIC, "", true);
+  mqtt.loop();
 
   if (strcmp(cmdPayload, "reset") == 0) {
     logf("Command   — resetting config and restarting into portal\n");
@@ -1417,6 +1425,20 @@ void publishConfigState() {
 // Saves to NVS and restarts if any field passes validation.
 void applyConfigChange() {
   if (!pendingFields) return;
+
+  // Clear each per-field retained topic from the broker before validation.
+  // Safe to publish here — we are outside mqttCallback (listen window has ended).
+  // Clearing unconditionally on receipt (even if validation later rejects the
+  // value) is correct: a bad value should not keep retrying every wake cycle.
+  {
+    char t[96];
+    if (pendingFields & PF_MQTT_BROKER)   { snprintf(t, sizeof(t), "%s/mqttBroker",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_MQTT_PORT)     { snprintf(t, sizeof(t), "%s/mqttPort",     CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_MQTT_USER)     { snprintf(t, sizeof(t), "%s/mqttUser",     CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_MQTT_PASSWORD) { snprintf(t, sizeof(t), "%s/mqttPassword", CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_SYSLOG_HOST)   { snprintf(t, sizeof(t), "%s/syslogHost",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_SYSLOG_PORT)   { snprintf(t, sizeof(t), "%s/syslogPort",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+  }
 
   bool changed = false;
   String err;
