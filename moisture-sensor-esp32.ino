@@ -16,6 +16,8 @@
 //    old 10% threshold; all other breakpoints rescaled proportionally
 //  - HA low battery binary sensor: autodiscovered entity reports ON when
 //    battery_pct <= 15%, using existing state topic (no new MQTT topic)
+//  - Reed switch two-stage hold: 3s = restart, 10s = wipe config + portal;
+//    log feedback at 3s mark so user knows to keep holding for full reset
 //
 //  v2.4.0
 //  - MQTT remote config: partial JSON updates to garden/sensorN/config/set
@@ -83,7 +85,8 @@ const int SLEEP_MINUTES      = 15;
 const int AP_TIMEOUT_MIN     = 10;
 const int AP_SLEEP_MIN       = 10;
 const int BOOT_HOLD_MS       = 3000;
-const int REED_HOLD_MS       = 3000;
+const int REED_RESTART_MS    = 3000;   // hold 3s  → restart
+const int REED_RESET_MS      = 10000;  // hold 10s → wipe config + restart into portal
 const int NTP_TIMEOUT_MS     = 10000;
 const int CMD_LISTEN_MS      = 2000;
 const int WIFI_TIMEOUT_MS    = 10000;  // max time waiting for WiFi association
@@ -1047,17 +1050,36 @@ void checkReedSwitch() {
 
   if (digitalRead(REED_PIN) == LOW) {
     logf("Reed      — magnet detected, waiting to confirm...\n");
-    unsigned long holdStart = millis();
+    unsigned long holdStart  = millis();
+    bool          restartArmed = false;
+
     while (digitalRead(REED_PIN) == LOW) {
-      if (millis() - holdStart >= REED_HOLD_MS) {
-        logf("Reed      — confirmed, restarting\n");
+      unsigned long held = millis() - holdStart;
+
+      if (held >= REED_RESET_MS) {
+        logf("Reed      — 10s hold: wiping config, restarting into portal\n");
         Serial.flush();
         delay(200);
+        clearConfig();
         ESP.restart();
       }
+
+      if (!restartArmed && held >= REED_RESTART_MS) {
+        restartArmed = true;
+        logf("Reed      — 3s hold: release to restart, keep holding for 10s to wipe config\n");
+      }
+
       delay(50);
     }
-    logf("Reed      — magnet removed early, ignoring\n");
+
+    if (restartArmed) {
+      logf("Reed      — released, restarting\n");
+      Serial.flush();
+      delay(200);
+      ESP.restart();
+    } else {
+      logf("Reed      — magnet removed early, ignoring\n");
+    }
   }
 }
 
