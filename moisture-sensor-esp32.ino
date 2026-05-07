@@ -244,6 +244,7 @@ char DISC_TS[128];
 char DISC_BTN_RESTART[128];
 char DISC_BTN_RESET[128];
 char DISC_BAT_LOW[128];
+char DISC_FW[128];
 char CONFIG_SET_PREFIX[80];   // garden/sensorN/config/set  (subscribe as .../+)
 char CONFIG_STATE_TOPIC[80];  // garden/sensorN/config/state
 char DISC_CFG_MQTT_BROKER[128];
@@ -275,6 +276,8 @@ void buildDerivedConfig() {
     "%s/button/%s_reset/config",             HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BAT_LOW, sizeof(DISC_BAT_LOW),
     "%s/binary_sensor/%s_battery_low/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_FW, sizeof(DISC_FW),
+    "%s/sensor/%s_fw/config",                 HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(CONFIG_SET_PREFIX,  sizeof(CONFIG_SET_PREFIX),  "garden/%s/config/set",    SENSOR_ID);
   snprintf(CONFIG_STATE_TOPIC, sizeof(CONFIG_STATE_TOPIC), "garden/%s/config/state",  SENSOR_ID);
   snprintf(DISC_CFG_MQTT_BROKER, sizeof(DISC_CFG_MQTT_BROKER),
@@ -1484,6 +1487,14 @@ void publishDiscovery() {
     "\"icon\":\"mdi:clock-outline\",%s}",
     SENSOR_ID, STATE_TOPIC, device);
   mqtt.publish(DISC_TS, payload, true);
+  mqtt.loop(); delay(50);
+
+  snprintf(payload, sizeof(payload),
+    "{\"name\":\"Firmware Version\",\"unique_id\":\"%s_fw\","
+    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.fw }}\","
+    "\"icon\":\"mdi:chip\",%s}",
+    SENSOR_ID, STATE_TOPIC, device);
+  mqtt.publish(DISC_FW, payload, true);
   mqtt.loop(); delay(50);
 
   // ── Button: Restart ──────────────────────────────────────
