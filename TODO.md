@@ -24,7 +24,9 @@ Items identified during v2 development for future releases.
 
 ## Nice to have
 
-- [ ] **Wiring diagram** — add a proper schematic diagram to the repo and README showing the complete circuit for the production hardware.
+- [x] **Wiring diagram** — SVG diagram in repo showing XIAO ESP32-C6, 18650, HW-390, voltage divider, and reed switch. Photos still outstanding (see below).
+
+- [ ] **Reed switch testing** — two-stage hold (3 s = restart, 10 s = wipe config) implemented in v2.4.1 but untested on real hardware. Dev device went pop before testing. Verify on next available unit: confirm 3 s triggers restart, confirm 10 s triggers config wipe and portal, confirm early release is ignored.
 
 - [ ] **Photos** — add photos of the assembled unit, enclosure, and deployed sensor to the README.
 

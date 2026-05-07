@@ -1,6 +1,6 @@
-<svg width="100%" viewBox="0 0 720 640" xmlns="http://www.w3.org/2000/svg" role="img">
+<svg width="100%" viewBox="0 0 720 670" xmlns="http://www.w3.org/2000/svg" role="img">
   <title>Garden Soil Moisture Sensor — Production Wiring Diagram</title>
-  <desc>XIAO ESP32-C6 wiring: A0/A1 left-top, GND/3V3 right-top, BAT pads underside centre. HW-390, 18650 direct to BAT pads (no diode), 2x200kOhm voltage divider. Note: no reverse polarity protection fitted.</desc>
+  <desc>XIAO ESP32-C6 wiring: A0/A1 left-top, GND/3V3 right-top, BAT pads underside centre. HW-390, 18650 direct to BAT pads (no diode), 2x200kOhm voltage divider. Reed switch (NO) on D3/GPIO3: hold 3s=restart, hold 10s=wipe config. Note: no reverse polarity protection fitted.</desc>
 
   <!-- ═══ XIAO ESP32-C6 board ═══
        USB-C at TOP.
@@ -26,8 +26,7 @@
 
   <line x1="280" y1="262" x2="270" y2="262" stroke="#888780" stroke-width="0.5"/>
   <text x="267" y="262" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D2</text>
-  <line x1="280" y1="298" x2="270" y2="298" stroke="#888780" stroke-width="0.5"/>
-  <text x="267" y="298" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D3</text>
+  <line x1="280" y1="298" x2="150" y2="298" stroke="#0369A1" stroke-width="1.5"/>
   <line x1="280" y1="334" x2="270" y2="334" stroke="#888780" stroke-width="0.5"/>
   <text x="267" y="334" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D4</text>
   <line x1="280" y1="370" x2="270" y2="370" stroke="#888780" stroke-width="0.5"/>
@@ -147,8 +146,23 @@
   <!-- Sensor AOUT → A1 (left side y=226, outside left) -->
   <path d="M200 476 L220 476 L220 410 L244 410 L244 226 L260 226" fill="none" stroke="#BA7517" stroke-width="1.5"/>
 
+  <!-- ═══ Reed Switch ═══ -->
+  <!-- NO reed switch on D3 (GPIO3) with internal pull-up.
+       One terminal → D3; other terminal → GND.
+       Hold 3 s = restart · Hold 10 s = wipe config + portal. -->
+  <rect x="30" y="265" width="120" height="66" rx="6" fill="none" stroke="#0369A1" stroke-width="1"/>
+  <text x="90" y="281" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="500" fill="#0369A1" dominant-baseline="central">Reed Switch</text>
+  <text x="90" y="294" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#0369A1" dominant-baseline="central">normally open · D3 (GPIO3)</text>
+  <text x="90" y="307" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#0369A1" dominant-baseline="central">3 s hold → restart</text>
+  <text x="90" y="319" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#0369A1" dominant-baseline="central">10 s hold → wipe config</text>
+
+  <!-- Reed switch right terminal → D3 (wire already drawn above replacing D3 stub) -->
+  <!-- Reed switch bottom terminal → GND rail at x=190 -->
+  <path d="M90 331 L90 400 L190 400" fill="none" stroke="#888780" stroke-width="1.5"/>
+  <circle cx="190" cy="400" r="3.5" fill="#888780"/>
+
   <!-- ═══ Legend ═══ -->
-  <rect x="20" y="596" width="690" height="30" rx="6" fill="none" stroke="#888780" stroke-width="0.5"/>
+  <rect x="20" y="596" width="690" height="50" rx="6" fill="none" stroke="#888780" stroke-width="0.5"/>
   <line x1="36" y1="611" x2="60" y2="611" stroke="#1D9E75" stroke-width="2"/>
   <text x="66" y="611" font-family="sans-serif" font-size="9" fill="#1D9E75" dominant-baseline="central">VCC / BAT+</text>
   <line x1="152" y1="611" x2="176" y2="611" stroke="#888780" stroke-width="2"/>
@@ -157,5 +171,7 @@
   <text x="256" y="611" font-family="sans-serif" font-size="9" fill="#BA7517" dominant-baseline="central">Analog / divider midpoint</text>
   <line x1="420" y1="611" x2="444" y2="611" stroke="#854F0B" stroke-width="1.5" stroke-dasharray="3 2"/>
   <text x="450" y="611" font-family="sans-serif" font-size="9" fill="#854F0B" dominant-baseline="central">Warning / no polarity protection</text>
-  <text x="708" y="611" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">github.com/mcleancraig/moisture-sensor-esp32</text>
+  <line x1="36" y1="631" x2="60" y2="631" stroke="#0369A1" stroke-width="2"/>
+  <text x="66" y="631" font-family="sans-serif" font-size="9" fill="#0369A1" dominant-baseline="central">Reed switch signal (D3)</text>
+  <text x="708" y="631" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">github.com/mcleancraig/moisture-sensor-esp32</text>
 </svg>
