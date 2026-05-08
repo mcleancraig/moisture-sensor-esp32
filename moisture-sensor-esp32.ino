@@ -10,6 +10,13 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.5.3
+//  - NVS magic key: loadConfig() checks for "moisture-1" magic in the
+//    "sensor" namespace; if a different value is found (stale NVS from
+//    a foreign firmware), the namespace is cleared and the device falls
+//    through to portal. Absent magic (pre-2.5.3 sensors) is left alone
+//    for backwards compatibility — magic is written on next saveConfig().
+//
 //  v2.5.2
 //  - MQTT password masked in publishConfigState() — publishes "***" instead
 //    of the real credential to the retained config/state topic
@@ -87,7 +94,7 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.5.2"
+#define FIRMWARE_VERSION "2.5.3"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -172,7 +179,27 @@ struct MoistureReading {
 
 bool configLoaded = false;
 
+// NVS magic — identifies config written by this firmware.
+// Wrong value means a different firmware used our namespace; absent means
+// a pre-2.5.3 sensor (backwards-compatible, magic written on next save).
+const char* NVS_MAGIC_KEY   = "magic";
+const char* NVS_MAGIC_VALUE = "moisture-1";
+
 void loadConfig() {
+  // Check magic before reading anything else.
+  // Wrong → clear stale NVS and return (configLoaded stays false → portal).
+  // Missing → proceed normally for pre-2.5.3 sensors.
+  prefs.begin("sensor", true);
+  String magic = prefs.getString(NVS_MAGIC_KEY, "");
+  prefs.end();
+  if (magic.length() > 0 && magic != NVS_MAGIC_VALUE) {
+    logf("Config    — NVS magic mismatch ('%s'), clearing\n", magic.c_str());
+    prefs.begin("sensor", false);
+    prefs.clear();
+    prefs.end();
+    return;
+  }
+
   prefs.begin("sensor", true);
   cfg.sensorNumber = prefs.getInt("sensorNum", 0);
   prefs.getString("wifiSSID",   cfg.wifiSSID,    sizeof(cfg.wifiSSID));
@@ -228,6 +255,7 @@ void clearConfig() {
 
 void saveConfig(const Config& c) {
   prefs.begin("sensor", false);
+  prefs.putString(NVS_MAGIC_KEY, NVS_MAGIC_VALUE);
   prefs.putInt("sensorNum",     c.sensorNumber);
   prefs.putString("wifiSSID",   c.wifiSSID);
   prefs.putString("wifiPass",   c.wifiPassword);
