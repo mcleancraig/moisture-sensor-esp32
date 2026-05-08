@@ -75,7 +75,7 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.5.1-dev.84d5b27"
+#define FIRMWARE_VERSION "2.5.1"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
