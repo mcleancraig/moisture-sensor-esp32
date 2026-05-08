@@ -179,6 +179,11 @@ struct MoistureReading {
 
 bool configLoaded = false;
 
+// Forward use of _logf() — Arduino IDE generates the prototype; macro must be
+// defined before any call site (loadConfig, clearConfig, saveConfig) so it
+// resolves here, not to math.h's float logf(float).
+#define logf(fmt, ...) _logf(__func__, fmt, ##__VA_ARGS__)
+
 // NVS magic — identifies config written by this firmware.
 // Wrong value means a different firmware used our namespace; absent means
 // a pre-2.5.3 sensor (backwards-compatible, magic written on next save).
@@ -241,10 +246,6 @@ void loadConfig() {
 
   configLoaded = (cfg.sensorNumber > 0 && strlen(cfg.wifiSSID) > 0 && strlen(cfg.mqttBroker) > 0);
 }
-
-// Forward use of _logf() — Arduino IDE generates the prototype; macro must be
-// defined before clearConfig()/saveConfig() so it resolves here, not to math.h.
-#define logf(fmt, ...) _logf(__func__, fmt, ##__VA_ARGS__)
 
 void clearConfig() {
   prefs.begin("sensor", false);
