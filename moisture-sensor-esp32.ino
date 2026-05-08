@@ -10,6 +10,18 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.5.2
+//  - MQTT password masked in publishConfigState() — publishes "***" instead
+//    of the real credential to the retained config/state topic
+//  - snprintf overflow: added publishMqttEntity() helper; both publishDiscovery()
+//    and publishConfigDiscovery() now skip-and-log instead of publishing
+//    silently-truncated JSON
+//  - LOW_BATTERY_PCT promoted to #define constant; magic 15 in Jinja template
+//    replaced so threshold and discovery payload stay in sync
+//  - BAT_CAL_OFFSET (always 0.0, no config path) removed
+//  - analogSetPinAttenuation() moved from readMoisture() to setup() — was
+//    called on every wake; now called once after config is loaded
+//
 //  v2.5.1
 //  - FOTA: add setHandshakeTimeout() to cover TLS handshake phase —
 //    setTimeout() only covers socket read/write; mbedTLS handshake could
@@ -75,7 +87,7 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.5.1"
+#define FIRMWARE_VERSION "2.5.2-dev.1ce9eab"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -87,7 +99,6 @@ const int REED_PIN     = 3;   // Reed switch — GND when magnet present
 const int   DRY_MV         = 2800;
 const int   WET_MV         = 1000;
 const float DIVIDER_RATIO  = 2.0;
-const float BAT_CAL_OFFSET = 0.0;
 const float BAT_MIN        = 2.5;
 const float BAT_MAX        = 4.3;
 
@@ -104,6 +115,9 @@ const int WIFI_TIMEOUT_MS    = 10000;  // max time waiting for WiFi association
 const int MQTT_TIMEOUT_S     =     5;  // TCP socket timeout per connect attempt
 const int FOTA_VERSION_TIMEOUT_MS = 8000;   // version.txt HTTP fetch
 const int FOTA_DL_TIMEOUT_MS      = 60000;  // firmware.bin download (large file)
+
+// ── Thresholds ────────────────────────────────────────────
+#define LOW_BATTERY_PCT 15   // battery_pct at which low-battery alert fires
 
 // ── AP credentials ────────────────────────────────────────
 const char* AP_PASSWORD      = "moisture";
@@ -1180,7 +1194,6 @@ void goToSleep() {
 }
 
 MoistureReading readMoisture() {
-  analogSetPinAttenuation(cfg.moisturePin, ADC_11db);
   delay(500);
   long sum = 0;
   for (int i = 0; i < 10; i++) {
@@ -1202,7 +1215,7 @@ float readBatteryVoltage(int &rawMv) {
     delay(5);
   }
   rawMv = sum / 16;
-  float voltage = (rawMv / 1000.0 * DIVIDER_RATIO) + BAT_CAL_OFFSET;
+  float voltage = rawMv / 1000.0 * DIVIDER_RATIO;
   if (voltage < BAT_MIN || voltage > BAT_MAX) {
     logf("Battery   — suspicious reading %.2fV (raw: %dmV), discarding\n",
       voltage, rawMv);
@@ -1435,6 +1448,22 @@ void processMqttCommand() {
 //  HA AUTODISCOVERY
 // ═══════════════════════════════════════════════════════════
 
+// Publishes a retained HA discovery payload.
+// Pass the return value of snprintf() as `written` — if it equals or exceeds
+// `bufSize` the output was truncated (snprintf returns the would-be length).
+// Truncated payloads are silently malformed JSON; we skip them and log instead.
+static void publishMqttEntity(const char* topic, const char* payload,
+                               size_t bufSize, int written) {
+  if (written < 0 || written >= (int)bufSize) {
+    logf("Discovery — SKIPPED %s (payload %d bytes, buffer %d)\n",
+         topic, written + 1, (int)bufSize);
+    return;
+  }
+  mqtt.publish(topic, payload, true);
+  mqtt.loop();
+  delay(50);
+}
+
 void publishDiscovery() {
   char device[256];
   snprintf(device, sizeof(device),
@@ -1447,90 +1476,82 @@ void publishDiscovery() {
     "}",
     SENSOR_ID, SENSOR_NAME, FIRMWARE_VERSION);
 
-  char payload[512];
+  char payload[640];
 
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Moisture\",\"unique_id\":\"%s_moisture\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.moisture }}\","
-    "\"unit_of_measurement\":\"%%\",\"device_class\":\"moisture\","
-    "\"state_class\":\"measurement\",\"icon\":\"mdi:water-percent\",%s}",
-    SENSOR_ID, STATE_TOPIC, device);
-  mqtt.publish(DISC_MOISTURE, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_MOISTURE, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Moisture\",\"unique_id\":\"%s_moisture\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.moisture }}\","
+      "\"unit_of_measurement\":\"%%\",\"device_class\":\"moisture\","
+      "\"state_class\":\"measurement\",\"icon\":\"mdi:water-percent\",%s}",
+      SENSOR_ID, STATE_TOPIC, device));
 
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Battery Voltage\",\"unique_id\":\"%s_battery_v\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.battery_v }}\","
-    "\"unit_of_measurement\":\"V\",\"device_class\":\"voltage\","
-    "\"state_class\":\"measurement\",\"icon\":\"mdi:battery\",%s}",
-    SENSOR_ID, STATE_TOPIC, device);
-  mqtt.publish(DISC_BAT_V, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_BAT_V, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Battery Voltage\",\"unique_id\":\"%s_battery_v\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.battery_v }}\","
+      "\"unit_of_measurement\":\"V\",\"device_class\":\"voltage\","
+      "\"state_class\":\"measurement\",\"icon\":\"mdi:battery\",%s}",
+      SENSOR_ID, STATE_TOPIC, device));
 
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Battery\",\"unique_id\":\"%s_battery_pct\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.battery_pct }}\","
-    "\"unit_of_measurement\":\"%%\",\"device_class\":\"battery\","
-    "\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\",%s}",
-    SENSOR_ID, STATE_TOPIC, device);
-  mqtt.publish(DISC_BAT_PCT, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_BAT_PCT, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Battery\",\"unique_id\":\"%s_battery_pct\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.battery_pct }}\","
+      "\"unit_of_measurement\":\"%%\",\"device_class\":\"battery\","
+      "\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\",%s}",
+      SENSOR_ID, STATE_TOPIC, device));
 
   // ── Binary sensor: Low Battery ───────────────────────────
   // Uses the existing state topic — no extra publish needed.
-  // Reads battery_pct from the JSON and reports ON (low) when <= 15%.
+  // Reads battery_pct from the JSON and reports ON (low) when <= LOW_BATTERY_PCT.
   // battery_pct is null when a suspicious reading is discarded; treated as
   // not-low in that case so a bad ADC reading doesn't spam alerts.
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Battery Low\",\"unique_id\":\"%s_battery_low\","
-    "\"state_topic\":\"%s\","
-    "\"value_template\":\"{{ 'ON' if value_json.battery_pct is not none and value_json.battery_pct | int <= 15 else 'OFF' }}\","
-    "\"device_class\":\"battery\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\","
-    "\"icon\":\"mdi:battery-alert\",%s}",
-    SENSOR_ID, STATE_TOPIC, device);
-  mqtt.publish(DISC_BAT_LOW, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_BAT_LOW, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Battery Low\",\"unique_id\":\"%s_battery_low\","
+      "\"state_topic\":\"%s\","
+      "\"value_template\":\"{{ 'ON' if value_json.battery_pct is not none and value_json.battery_pct | int <= %d else 'OFF' }}\","
+      "\"device_class\":\"battery\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\","
+      "\"icon\":\"mdi:battery-alert\",%s}",
+      SENSOR_ID, STATE_TOPIC, LOW_BATTERY_PCT, device));
 
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Last Seen\",\"unique_id\":\"%s_ts\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.ts }}\","
-    "\"device_class\":\"timestamp\","
-    "\"icon\":\"mdi:clock-outline\",%s}",
-    SENSOR_ID, STATE_TOPIC, device);
-  mqtt.publish(DISC_TS, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_TS, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Last Seen\",\"unique_id\":\"%s_ts\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.ts }}\","
+      "\"device_class\":\"timestamp\","
+      "\"icon\":\"mdi:clock-outline\",%s}",
+      SENSOR_ID, STATE_TOPIC, device));
 
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Firmware Version\",\"unique_id\":\"%s_fw\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.fw }}\","
-    "\"icon\":\"mdi:chip\",%s}",
-    SENSOR_ID, STATE_TOPIC, device);
-  mqtt.publish(DISC_FW, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_FW, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Firmware Version\",\"unique_id\":\"%s_fw\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.fw }}\","
+      "\"icon\":\"mdi:chip\",%s}",
+      SENSOR_ID, STATE_TOPIC, device));
 
   // ── Button: Restart ──────────────────────────────────────
   // Publishes a retained "restart" to CMD_TOPIC when pressed in HA.
   // The sensor picks this up on its next wake, restarts, then clears it.
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Restart\",\"unique_id\":\"%s_restart\","
-    "\"command_topic\":\"%s\",\"payload_press\":\"restart\","
-    "\"retain\":true,\"device_class\":\"restart\","
-    "\"icon\":\"mdi:restart\",%s}",
-    SENSOR_ID, CMD_TOPIC, device);
-  mqtt.publish(DISC_BTN_RESTART, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_BTN_RESTART, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Restart\",\"unique_id\":\"%s_restart\","
+      "\"command_topic\":\"%s\",\"payload_press\":\"restart\","
+      "\"retain\":true,\"device_class\":\"restart\","
+      "\"icon\":\"mdi:restart\",%s}",
+      SENSOR_ID, CMD_TOPIC, device));
 
   // ── Button: Reset Config ─────────────────────────────────
   // Publishes a retained "reset" to CMD_TOPIC when pressed in HA.
   // The sensor clears NVS and opens the captive portal on next wake.
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Reset Config\",\"unique_id\":\"%s_reset\","
-    "\"command_topic\":\"%s\",\"payload_press\":\"reset\","
-    "\"retain\":true,"
-    "\"icon\":\"mdi:restore\",%s}",
-    SENSOR_ID, CMD_TOPIC, device);
-  mqtt.publish(DISC_BTN_RESET, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_BTN_RESET, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Reset Config\",\"unique_id\":\"%s_reset\","
+      "\"command_topic\":\"%s\",\"payload_press\":\"reset\","
+      "\"retain\":true,"
+      "\"icon\":\"mdi:restore\",%s}",
+      SENSOR_ID, CMD_TOPIC, device));
 
   logf("Discovery — complete (sensors + buttons)\n");
 }
@@ -1554,17 +1575,17 @@ void publishDiscovery() {
 // Publishes current configurable settings as a retained JSON object.
 // Called on every boot (so HA text/number entities reflect current state)
 // and again after applying a remote config change.
-// Note: mqttPassword is included so the HA text entity can show its value.
-//       This is acceptable for a private LAN broker.
+// Note: mqttPassword is masked ("***") — the plaintext credential must not
+//       sit in a retained topic readable by any MQTT subscriber on the LAN.
 void publishConfigState() {
   char payload[384];
   snprintf(payload, sizeof(payload),
     "{\"mqttBroker\":\"%s\",\"mqttPort\":%d,"
-    "\"mqttUser\":\"%s\",\"mqttPassword\":\"%s\","
+    "\"mqttUser\":\"%s\",\"mqttPassword\":\"***\","
     "\"syslogHost\":\"%s\",\"syslogPort\":%d,"
     "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d}",
     cfg.mqttBroker, cfg.mqttPort,
-    cfg.mqttUser, cfg.mqttPassword,
+    cfg.mqttUser,
     cfg.syslogHost, cfg.syslogPort,
     cfg.moisturePin, cfg.batteryPin, cfg.reedPin);
   mqtt.publish(CONFIG_STATE_TOPIC, payload, true);
@@ -1693,93 +1714,86 @@ void publishConfigDiscovery() {
   // No command_template needed — HA sends the raw field value directly.
 
   // ── Text: MQTT Broker ────────────────────────────────────
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"MQTT Broker\",\"unique_id\":\"%s_cfg_mqtt_broker\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttBroker }}\","
-    "\"command_topic\":\"%s/mqttBroker\",\"retain\":true,\"max\":63,%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
-  mqtt.publish(DISC_CFG_MQTT_BROKER, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_CFG_MQTT_BROKER, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"MQTT Broker\",\"unique_id\":\"%s_cfg_mqtt_broker\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttBroker }}\","
+      "\"command_topic\":\"%s/mqttBroker\",\"retain\":true,\"max\":63,%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Number: MQTT Port ────────────────────────────────────
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"MQTT Port\",\"unique_id\":\"%s_cfg_mqtt_port\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPort }}\","
-    "\"command_topic\":\"%s/mqttPort\",\"retain\":true,"
-    "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
-  mqtt.publish(DISC_CFG_MQTT_PORT, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_CFG_MQTT_PORT, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"MQTT Port\",\"unique_id\":\"%s_cfg_mqtt_port\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPort }}\","
+      "\"command_topic\":\"%s/mqttPort\",\"retain\":true,"
+      "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Text: MQTT Username ──────────────────────────────────
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"MQTT Username\",\"unique_id\":\"%s_cfg_mqtt_user\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttUser }}\","
-    "\"command_topic\":\"%s/mqttUser\",\"retain\":true,\"max\":31,%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
-  mqtt.publish(DISC_CFG_MQTT_USER, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_CFG_MQTT_USER, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"MQTT Username\",\"unique_id\":\"%s_cfg_mqtt_user\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttUser }}\","
+      "\"command_topic\":\"%s/mqttUser\",\"retain\":true,\"max\":31,%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Text: MQTT Password ──────────────────────────────────
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"MQTT Password\",\"unique_id\":\"%s_cfg_mqtt_pass\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPassword }}\","
-    "\"command_topic\":\"%s/mqttPassword\",\"retain\":true,\"max\":63,%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
-  mqtt.publish(DISC_CFG_MQTT_PASS, payload, true);
-  mqtt.loop(); delay(50);
+  // Note: state_topic publishes "***" for the password — this entity is
+  // write-only from HA's perspective; the current value is never displayed.
+  publishMqttEntity(DISC_CFG_MQTT_PASS, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"MQTT Password\",\"unique_id\":\"%s_cfg_mqtt_pass\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPassword }}\","
+      "\"command_topic\":\"%s/mqttPassword\",\"retain\":true,\"max\":63,%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Text: Syslog Host ────────────────────────────────────
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Syslog Host\",\"unique_id\":\"%s_cfg_syslog_host\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogHost }}\","
-    "\"command_topic\":\"%s/syslogHost\",\"retain\":true,\"max\":63,%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
-  mqtt.publish(DISC_CFG_SYSLOG_HOST, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_CFG_SYSLOG_HOST, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Syslog Host\",\"unique_id\":\"%s_cfg_syslog_host\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogHost }}\","
+      "\"command_topic\":\"%s/syslogHost\",\"retain\":true,\"max\":63,%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Number: Syslog Port ──────────────────────────────────
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Syslog Port\",\"unique_id\":\"%s_cfg_syslog_port\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogPort }}\","
-    "\"command_topic\":\"%s/syslogPort\",\"retain\":true,"
-    "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
-  mqtt.publish(DISC_CFG_SYSLOG_PORT, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_CFG_SYSLOG_PORT, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Syslog Port\",\"unique_id\":\"%s_cfg_syslog_port\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogPort }}\","
+      "\"command_topic\":\"%s/syslogPort\",\"retain\":true,"
+      "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Number: Moisture Pin ─────────────────────────────────
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Moisture Pin\",\"unique_id\":\"%s_cfg_moisture_pin\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.moisturePin }}\","
-    "\"command_topic\":\"%s/moisturePin\",\"retain\":true,"
-    "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
-    "\"icon\":\"mdi:water-percent\",%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
-  mqtt.publish(DISC_CFG_MOISTURE_PIN, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_CFG_MOISTURE_PIN, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Moisture Pin\",\"unique_id\":\"%s_cfg_moisture_pin\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.moisturePin }}\","
+      "\"command_topic\":\"%s/moisturePin\",\"retain\":true,"
+      "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
+      "\"icon\":\"mdi:water-percent\",%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Number: Battery Pin ──────────────────────────────────
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Battery Pin\",\"unique_id\":\"%s_cfg_battery_pin\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.batteryPin }}\","
-    "\"command_topic\":\"%s/batteryPin\",\"retain\":true,"
-    "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
-    "\"icon\":\"mdi:battery\",%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
-  mqtt.publish(DISC_CFG_BATTERY_PIN, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_CFG_BATTERY_PIN, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Battery Pin\",\"unique_id\":\"%s_cfg_battery_pin\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.batteryPin }}\","
+      "\"command_topic\":\"%s/batteryPin\",\"retain\":true,"
+      "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
+      "\"icon\":\"mdi:battery\",%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Number: Reed Switch Pin ──────────────────────────────
-  snprintf(payload, sizeof(payload),
-    "{\"name\":\"Reed Switch Pin\",\"unique_id\":\"%s_cfg_reed_pin\","
-    "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.reedPin }}\","
-    "\"command_topic\":\"%s/reedPin\",\"retain\":true,"
-    "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
-    "\"icon\":\"mdi:magnet\",%s}",
-    SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device);
-  mqtt.publish(DISC_CFG_REED_PIN, payload, true);
-  mqtt.loop(); delay(50);
+  publishMqttEntity(DISC_CFG_REED_PIN, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Reed Switch Pin\",\"unique_id\":\"%s_cfg_reed_pin\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.reedPin }}\","
+      "\"command_topic\":\"%s/reedPin\",\"retain\":true,"
+      "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
+      "\"icon\":\"mdi:magnet\",%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   logf("Discovery — config entities published\n");
 }
@@ -1832,6 +1846,9 @@ void setup() {
     cfg.sensorNumber, cfg.wifiSSID, cfg.mqttBroker);
 
   // ── Read sensors before WiFi — radio noise affects ADC ───
+  // Set ADC attenuation once here (after config load so we have the right pin).
+  // Moved out of readMoisture() so it runs once per wake, not per call.
+  analogSetPinAttenuation(cfg.moisturePin, ADC_11db);
   MoistureReading moisture = readMoisture();
 
   int   batRawMv = 0;
