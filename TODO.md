@@ -32,4 +32,6 @@ Items identified during v2 development for future releases.
 
 - [ ] **Calibration helper** — add a calibration mode triggered by double-tap of the boot button that holds the sensor awake, streams raw ADC readings over serial, and publishes min/max observed values to MQTT to assist with DRY_MV / WET_MV calibration without reflashing.
 
-- [ ] **Low battery alert** — publish to a `garden/sensorN/alert` topic when battery drops below 20%, allowing Home Assistant to trigger a notification.
+- [x] **Low battery alert** — binary sensor autodiscovery entity, reports ON at ≤ 15% (v2.4.1).
+
+- [ ] **FOTA downgrade protection** — FOTA currently does a plain string compare (remote != local → flash). A sensor running a pre-release version newer than the latest GitHub Release will be downgraded. Fix: parse semver and only flash if remote > local. Downgrade should be possible but opt-in (e.g. via MQTT command or portal toggle), not the default behaviour.

@@ -10,6 +10,12 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.5.1
+//  - FOTA: add setHandshakeTimeout() to cover TLS handshake phase —
+//    setTimeout() only covers socket read/write; mbedTLS handshake could
+//    hang indefinitely without this. Applied to both version check and
+//    binary download connections.
+//
 //  v2.5.0
 //  - Configurable GPIO pins: moisturePin, batteryPin, reedPin stored in NVS
 //    with safe defaults (0, 1, 3); settable via captive portal Advanced
@@ -69,7 +75,7 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.5.0"
+#define FIRMWARE_VERSION "2.5.1"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -1019,7 +1025,10 @@ void checkForUpdate() {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(FOTA_VERSION_TIMEOUT_MS / 1000);  // WiFiClientSecure uses seconds
+  client.setTimeout(FOTA_VERSION_TIMEOUT_MS / 1000);         // socket read/write timeout (seconds)
+  client.setHandshakeTimeout(FOTA_VERSION_TIMEOUT_MS / 1000); // TLS handshake timeout (seconds)
+  // Note: setTimeout() does NOT cover the mbedTLS handshake phase — setHandshakeTimeout()
+  // is required to prevent an indefinite hang when GitHub CDN is slow to complete TLS.
 
   HTTPClient http;
   http.begin(client, FOTA_VERSION_URL);
@@ -1048,8 +1057,10 @@ void checkForUpdate() {
   logf("FOTA      — update available: %s -> %s, downloading...\n",
     FIRMWARE_VERSION, remoteVersion.c_str());
 
-  // Fresh client for the binary download — longer timeout for large file
+  // Fresh client for the binary download — longer timeout for large file.
+  // CDN redirect means a new TLS handshake — update both timeouts.
   client.setTimeout(FOTA_DL_TIMEOUT_MS / 1000);
+  client.setHandshakeTimeout(FOTA_DL_TIMEOUT_MS / 1000);
 
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   httpUpdate.onStart([]() {
