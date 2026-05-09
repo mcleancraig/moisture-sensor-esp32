@@ -94,7 +94,7 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.5.3-dev.dca13e9"
+#define FIRMWARE_VERSION "2.5.3-dev.8ebdf4c"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -305,6 +305,12 @@ char DISC_CFG_SYSLOG_PORT[128];
 char DISC_CFG_MOISTURE_PIN[128];
 char DISC_CFG_BATTERY_PIN[128];
 char DISC_CFG_REED_PIN[128];
+// Network config discovery topics
+char DISC_CFG_STATIC_IP[128];
+char DISC_CFG_IP[128];
+char DISC_CFG_GW[128];
+char DISC_CFG_SN[128];
+char DISC_CFG_DNS[128];
 
 void buildDerivedConfig() {
   snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.sensorNumber);
@@ -347,6 +353,17 @@ void buildDerivedConfig() {
     "%s/number/%s_cfg_battery_pin/config",  HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_REED_PIN, sizeof(DISC_CFG_REED_PIN),
     "%s/number/%s_cfg_reed_pin/config",     HA_DISCOVERY_PREFIX, SENSOR_ID);
+
+  snprintf(DISC_CFG_STATIC_IP, sizeof(DISC_CFG_STATIC_IP),
+    "%s/switch/%s_cfg_static_ip/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_CFG_IP,        sizeof(DISC_CFG_IP),
+    "%s/text/%s_cfg_ip/config",            HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_CFG_GW,        sizeof(DISC_CFG_GW),
+    "%s/text/%s_cfg_gw/config",            HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_CFG_SN,        sizeof(DISC_CFG_SN),
+    "%s/text/%s_cfg_sn/config",            HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_CFG_DNS,       sizeof(DISC_CFG_DNS),
+    "%s/text/%s_cfg_dns/config",           HA_DISCOVERY_PREFIX, SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1335,6 +1352,11 @@ static char pendingSyslogPort[8]     = "";
 static char pendingMoisturePin[4]    = "";
 static char pendingBatteryPin[4]     = "";
 static char pendingReedPin[4]        = "";
+static char pendingStaticIP[8]       = "";  // "true" or "false"
+static char pendingIP[16]            = "";
+static char pendingGW[16]            = "";
+static char pendingSN[16]            = "";
+static char pendingDNS[16]           = "";
 static uint16_t pendingFields        = 0;   // bitmask — which fields arrived this cycle
 #define PF_MQTT_BROKER    (1<<0)
 #define PF_MQTT_PORT      (1<<1)
@@ -1345,6 +1367,11 @@ static uint16_t pendingFields        = 0;   // bitmask — which fields arrived 
 #define PF_MOISTURE_PIN   (1<<6)
 #define PF_BATTERY_PIN    (1<<7)
 #define PF_REED_PIN       (1<<8)
+#define PF_STATIC_IP      (1<<9)
+#define PF_IP             (1<<10)
+#define PF_GW             (1<<11)
+#define PF_SN             (1<<12)
+#define PF_DNS            (1<<13)
 
 // ── IMPORTANT: callback safety rules ────────────────────────
 // PubSubClient passes topic and payload as pointers INTO its internal buffer.
@@ -1403,6 +1430,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     else if (strcmp(fieldName, "moisturePin")  == 0) { strlcpy(pendingMoisturePin,  val, sizeof(pendingMoisturePin));  pendingFields |= PF_MOISTURE_PIN;  }
     else if (strcmp(fieldName, "batteryPin")   == 0) { strlcpy(pendingBatteryPin,   val, sizeof(pendingBatteryPin));   pendingFields |= PF_BATTERY_PIN;   }
     else if (strcmp(fieldName, "reedPin")      == 0) { strlcpy(pendingReedPin,      val, sizeof(pendingReedPin));      pendingFields |= PF_REED_PIN;      }
+    else if (strcmp(fieldName, "staticIP")    == 0) { strlcpy(pendingStaticIP,    val, sizeof(pendingStaticIP));    pendingFields |= PF_STATIC_IP;    }
+    else if (strcmp(fieldName, "ip")          == 0) { strlcpy(pendingIP,          val, sizeof(pendingIP));          pendingFields |= PF_IP;           }
+    else if (strcmp(fieldName, "gw")          == 0) { strlcpy(pendingGW,          val, sizeof(pendingGW));          pendingFields |= PF_GW;           }
+    else if (strcmp(fieldName, "sn")          == 0) { strlcpy(pendingSN,          val, sizeof(pendingSN));          pendingFields |= PF_SN;           }
+    else if (strcmp(fieldName, "dns")         == 0) { strlcpy(pendingDNS,         val, sizeof(pendingDNS));         pendingFields |= PF_DNS;          }
     // Unknown fields silently ignored
   }
 }
@@ -1607,16 +1639,24 @@ void publishDiscovery() {
 // Note: mqttPassword is masked ("***") — the plaintext credential must not
 //       sit in a retained topic readable by any MQTT subscriber on the LAN.
 void publishConfigState() {
-  char payload[384];
+  char ipStr[16], gwStr[16], snStr[16], dnsStr[16];
+  snprintf(ipStr,  sizeof(ipStr),  "%d.%d.%d.%d", cfg.ip[0],  cfg.ip[1],  cfg.ip[2],  cfg.ip[3]);
+  snprintf(gwStr,  sizeof(gwStr),  "%d.%d.%d.%d", cfg.gw[0],  cfg.gw[1],  cfg.gw[2],  cfg.gw[3]);
+  snprintf(snStr,  sizeof(snStr),  "%d.%d.%d.%d", cfg.sn[0],  cfg.sn[1],  cfg.sn[2],  cfg.sn[3]);
+  snprintf(dnsStr, sizeof(dnsStr), "%d.%d.%d.%d", cfg.dns[0], cfg.dns[1], cfg.dns[2], cfg.dns[3]);
+
+  char payload[512];
   snprintf(payload, sizeof(payload),
     "{\"mqttBroker\":\"%s\",\"mqttPort\":%d,"
     "\"mqttUser\":\"%s\",\"mqttPassword\":\"***\","
     "\"syslogHost\":\"%s\",\"syslogPort\":%d,"
-    "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d}",
+    "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d,"
+    "\"staticIP\":%s,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"dns\":\"%s\"}",
     cfg.mqttBroker, cfg.mqttPort,
     cfg.mqttUser,
     cfg.syslogHost, cfg.syslogPort,
-    cfg.moisturePin, cfg.batteryPin, cfg.reedPin);
+    cfg.moisturePin, cfg.batteryPin, cfg.reedPin,
+    cfg.staticIP ? "true" : "false", ipStr, gwStr, snStr, dnsStr);
   mqtt.publish(CONFIG_STATE_TOPIC, payload, true);
   mqtt.loop();
   logf("Config    — state published to %s\n", CONFIG_STATE_TOPIC);
@@ -1643,6 +1683,11 @@ void applyConfigChange() {
     if (pendingFields & PF_MOISTURE_PIN)  { snprintf(t, sizeof(t), "%s/moisturePin",  CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_BATTERY_PIN)   { snprintf(t, sizeof(t), "%s/batteryPin",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_REED_PIN)      { snprintf(t, sizeof(t), "%s/reedPin",      CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_STATIC_IP)   { snprintf(t, sizeof(t), "%s/staticIP",    CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_IP)          { snprintf(t, sizeof(t), "%s/ip",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_GW)          { snprintf(t, sizeof(t), "%s/gw",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_SN)          { snprintf(t, sizeof(t), "%s/sn",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_DNS)         { snprintf(t, sizeof(t), "%s/dns",         CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
   }
 
   bool changed = false;
@@ -1707,6 +1752,28 @@ void applyConfigChange() {
     else if (p == cfg.moisturePin || p == cfg.batteryPin) { logf("Config    — reedPin rejected: conflicts with another pin\n"); }
     else { cfg.reedPin = p; logf("Config    — reedPin -> %d\n", p); changed = true; }
   }
+
+  if (pendingFields & PF_STATIC_IP) {
+    if (strcmp(pendingStaticIP, "true") == 0)       { cfg.staticIP = true;  logf("Config    — staticIP -> true\n");  changed = true; }
+    else if (strcmp(pendingStaticIP, "false") == 0) { cfg.staticIP = false; logf("Config    — staticIP -> false\n"); changed = true; }
+    else { logf("Config    — staticIP rejected: must be 'true' or 'false'\n"); }
+  }
+
+  auto applyIPField = [&](const char* val, uint8_t* bytes, const char* name) {
+    IPAddress addr;
+    if (addr.fromString(val)) {
+      bytes[0] = addr[0]; bytes[1] = addr[1]; bytes[2] = addr[2]; bytes[3] = addr[3];
+      logf("Config    — %s -> %s\n", name, val);
+      changed = true;
+    } else {
+      logf("Config    — %s rejected: not a valid IPv4 address\n", name);
+    }
+  };
+
+  if (pendingFields & PF_IP)  applyIPField(pendingIP,  cfg.ip,  "ip");
+  if (pendingFields & PF_GW)  applyIPField(pendingGW,  cfg.gw,  "gw");
+  if (pendingFields & PF_SN)  applyIPField(pendingSN,  cfg.sn,  "sn");
+  if (pendingFields & PF_DNS) applyIPField(pendingDNS, cfg.dns, "dns");
 
   if (changed) {
     saveConfig(cfg);
@@ -1823,6 +1890,38 @@ void publishConfigDiscovery() {
       "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
       "\"icon\":\"mdi:magnet\",%s}",
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+
+  // ── Switch: Static IP ────────────────────────────────────
+  // payload_on/off are the raw values sent to the per-field subtopic
+  publishMqttEntity(DISC_CFG_STATIC_IP, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Static IP\",\"unique_id\":\"%s_cfg_static_ip\","
+      "\"state_topic\":\"%s\","
+      "\"value_template\":\"{%% if value_json.staticIP %%}ON{%% else %%}OFF{%% endif %%}\","
+      "\"command_topic\":\"%s/staticIP\",\"retain\":true,"
+      "\"payload_on\":\"true\",\"payload_off\":\"false\","
+      "\"entity_category\":\"config\",%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+
+  // ── Text: IP, Gateway, Subnet Mask, DNS ──────────────────
+  const struct { const char* name; const char* uid; const char* key; const char* disc; } netFields[] = {
+    { "IP Address",  "cfg_ip",  "ip",  DISC_CFG_IP  },
+    { "Gateway",     "cfg_gw",  "gw",  DISC_CFG_GW  },
+    { "Subnet Mask", "cfg_sn",  "sn",  DISC_CFG_SN  },
+    { "DNS Server",  "cfg_dns", "dns", DISC_CFG_DNS },
+  };
+  for (auto& f : netFields) {
+    publishMqttEntity(f.disc, payload, sizeof(payload),
+      snprintf(payload, sizeof(payload),
+        "{\"name\":\"%s\",\"unique_id\":\"%s_%s\","
+        "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.%s }}\","
+        "\"command_topic\":\"%s/%s\",\"retain\":true,\"max\":15,"
+        "\"entity_category\":\"config\",%s}",
+        f.name, SENSOR_ID, f.uid,
+        CONFIG_STATE_TOPIC, f.key,
+        CONFIG_SET_PREFIX, f.key,
+        device));
+  }
 
   logf("Discovery — config entities published\n");
 }
