@@ -14,6 +14,8 @@ Items identified during v2 development for future releases.
 
 ## Maintainability
 
+- [ ] **NVS magic — tighten to clear-on-absent (post-fleet-update)** — v2.5.3 clears the `"sensor"` namespace only when the magic key is *wrong* (a different value); absent magic is left alone for backwards compatibility with pre-2.5.3 sensors. Once all deployed sensors have run 2.5.3+ (and therefore written the magic key on their next save), flip the logic to also clear on absent — making it consistent with the pump controller's stricter policy. Check sensor firmware versions in HA before doing this.
+
 - [x] **FOTA (v2.1.0)** — sensors automatically check GitHub Releases on each wake and self-update. Attach `version.txt` and `firmware.bin` to each release. IDE-based OTA removed.
 
 - [ ] **PCB design** — replace breadboard/perfboard wiring with a custom 2-layer PCB. Castellated footprint for the XIAO ESP32-C6, HW-390 JST connector, 2x 200k voltage divider resistors, 100nF bypass cap, BAT+/BAT- pads. Fabricate via JLCPCB. Reduces assembly time per unit from ~30 min to ~5 min.
