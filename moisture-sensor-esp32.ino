@@ -10,6 +10,11 @@
 #include "esp_mac.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.5.4
+//  - Reed switch default pin changed from 3 to 2 — GPIO3 on XIAO ESP32-C6
+//    does not function as a digital input; GPIO2 (D2) confirmed working.
+//    Existing sensors are unaffected (reedPin stored in NVS).
+//
 //  v2.5.3
 //  - NVS magic key: loadConfig() checks for "moisture-1" magic in the
 //    "sensor" namespace; if a different value is found (stale NVS from
@@ -37,7 +42,7 @@
 //
 //  v2.5.0
 //  - Configurable GPIO pins: moisturePin, batteryPin, reedPin stored in NVS
-//    with safe defaults (0, 1, 3); settable via captive portal Advanced
+//    with safe defaults (0, 1, 2); settable via captive portal Advanced
 //    section and MQTT remote config — accommodates hardware variations
 //
 //  v2.4.1
@@ -94,13 +99,13 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.5.3"
+#define FIRMWARE_VERSION "2.5.4-dev.init"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
 const int BATTERY_PIN  = 1;   // A1 — voltage divider midpoint
 const int BTN_BOOT     = 9;   // Boot button on XIAO ESP32-C6
-const int REED_PIN     = 3;   // Reed switch — GND when magnet present
+const int REED_PIN     = 2;   // Reed switch — GND when magnet present
 
 // ── Fixed calibration ─────────────────────────────────────
 const int   DRY_MV         = 2800;
@@ -169,7 +174,7 @@ struct Config {
   // GPIO pin assignments — configurable to accommodate hardware variations
   int     moisturePin;   // default 0  (A0/GPIO0)
   int     batteryPin;    // default 1  (A1/GPIO1)
-  int     reedPin;       // default 3  (D3/GPIO3)
+  int     reedPin;       // default 2  (D2/GPIO2)
 } cfg;
 
 struct MoistureReading {
@@ -240,7 +245,7 @@ void loadConfig() {
 
   cfg.moisturePin = prefs.getInt("moisturePin", 0);
   cfg.batteryPin  = prefs.getInt("batteryPin",  1);
-  cfg.reedPin     = prefs.getInt("reedPin",     3);
+  cfg.reedPin     = prefs.getInt("reedPin",     2);
 
   prefs.end();
 
@@ -650,7 +655,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
       </label>
       <p class="hint">Default: 1 (A1/GPIO1)</p>
       <label>Reed switch pin
-        <input type="number" name="reedPin" value="3" min="0" max="10">
+        <input type="number" name="reedPin" value="2" min="0" max="10">
       </label>
       <p class="hint">Default: 3 (D3/GPIO3)</p>
     </div>
