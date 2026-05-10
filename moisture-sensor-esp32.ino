@@ -8,8 +8,17 @@
 #include <WiFiClientSecure.h>
 #include <time.h>
 #include "esp_mac.h"
+#include "esp_sleep.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.6.0
+//  - Reed switch wakes device from deep sleep immediately on magnet contact
+//    via esp_deep_sleep_enable_gpio_wakeup(). Previously the device only
+//    checked the reed on the 15-minute timer tick, making the 3s/10s hold
+//    timing impractical (user couldn't know when the check window started).
+//    Now: magnet present → device wakes within ms → hold 3s to restart,
+//    hold 10s to wipe config. Existing checkReedSwitch() timing unchanged.
+//
 //  v2.5.3
 //  - NVS magic key: loadConfig() checks for "moisture-1" magic in the
 //    "sensor" namespace; if a different value is found (stale NVS from
@@ -94,7 +103,7 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.5.3"
+#define FIRMWARE_VERSION "2.6.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -1234,6 +1243,13 @@ void checkReedSwitch() {
 
 void goToSleep() {
   logf("Sleep     — going to sleep for %d minutes\n", SLEEP_MINUTES);
+
+  // Enable GPIO wakeup so a magnet presentation wakes the device immediately.
+  // INPUT_PULLUP keeps the pin HIGH (reed open); closing to GND fires the wake.
+  // The pullup state is retained during deep sleep so no spurious wakeups occur.
+  pinMode(cfg.reedPin, INPUT_PULLUP);
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << cfg.reedPin, ESP_GPIO_WAKEUP_GPIO_LOW);
+
   Serial.flush();
   esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60 * 1000000ULL);
   esp_deep_sleep_start();
@@ -1942,6 +1958,10 @@ void setup() {
   loadConfig();
 
   // ── Reed switch check ─────────────────────────────────────
+  // Log if we were woken by the reed switch rather than the timer.
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
+    logf("Wake      — GPIO wakeup (reed switch)\n");
+  }
   checkReedSwitch();
 
   // ── Boot button check — hold for 3s to force reconfiguration ──
