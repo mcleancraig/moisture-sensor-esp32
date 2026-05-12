@@ -11,6 +11,9 @@
 #include "esp_sleep.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.6.2
+//  - Sleep interval increased from 15 to 120 minutes to extend battery life.
+//
 //  v2.6.1
 //  - Reed switch default pin changed from 3 to 2 — GPIO3 on XIAO ESP32-C6
 //    does not function as a digital input; GPIO2 (D2) confirmed working.
@@ -108,7 +111,7 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.6.1"
+#define FIRMWARE_VERSION "2.6.2"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -124,7 +127,7 @@ const float BAT_MIN        = 2.5;
 const float BAT_MAX        = 4.3;
 
 // ── Timing ────────────────────────────────────────────────
-const int SLEEP_MINUTES      = 15;
+const int SLEEP_MINUTES      = 120;
 const int AP_TIMEOUT_MIN     = 10;
 const int AP_SLEEP_MIN       = 10;
 const int BOOT_HOLD_MS       = 3000;
