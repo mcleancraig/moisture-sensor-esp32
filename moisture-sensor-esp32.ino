@@ -136,7 +136,7 @@
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "2.8.0-b02"
+#define FIRMWARE_VERSION "2.8.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -1265,8 +1265,11 @@ void checkForUpdate() {
     // If no beta exists yet it returns the latest stable — sit tight.
     bool remoteIsBeta = remoteVersion.indexOf("-b") >= 0;
     if (remoteIsBeta) {
-      // dev→beta, beta→same-beta (no-op), beta→newer/older-beta
       shouldUpdate = (remoteVersion != String(FIRMWARE_VERSION));
+      if (shouldUpdate && !isDev) {
+        // Currently on a stable build, switching to beta channel
+        logf("FOTA      — switching from stable to beta build\n");
+      }
     } else {
       logf("FOTA      — no beta release available yet, staying put\n");
       shouldUpdate = false;
@@ -1274,10 +1277,9 @@ void checkForUpdate() {
   } else {
     // Stable: update only if remote is strictly newer.
     shouldUpdate = strcmp(remoteVersion.c_str(), FIRMWARE_VERSION) > 0;
-    // Also promote if currently on any dev/beta build (has '-') and a stable
-    // release exists — covers the "switch channel back to stable" case.
+    // Also covers the "switched channel back to stable" case for dev/beta builds.
     if (!shouldUpdate && isDev && remoteVersion.length() > 0) {
-      logf("FOTA      — promoting dev/beta build to stable\n");
+      logf("FOTA      — switching from beta to stable build\n");
       shouldUpdate = true;
     }
   }
