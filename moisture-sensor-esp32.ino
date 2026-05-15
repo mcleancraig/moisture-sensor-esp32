@@ -136,7 +136,7 @@
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "2.8.0-dev.64b5b0e"
+#define FIRMWARE_VERSION "2.8.0-dev.388d726"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -1260,9 +1260,23 @@ void checkForUpdate() {
   // ── Decide whether to update ──────────────────────────────
   bool shouldUpdate = false;
   if (isBeta) {
-    // Beta: update whenever the remote tag differs from what we're running.
-    // "Different" rather than "newer" handles dev→beta and beta→beta transitions.
-    shouldUpdate = (remoteVersion != String(FIRMWARE_VERSION));
+    // Beta: "different = update" ONLY when the API actually returned a
+    // pre-release (tag contains "-b").  If no beta exists yet, the API
+    // returns the latest stable — don't downgrade to it.
+    bool remoteIsBeta = remoteVersion.indexOf("-b") >= 0;
+    if (remoteIsBeta) {
+      // dev→beta, beta→same-beta (no-op), beta→newer-beta, beta→older-beta
+      shouldUpdate = (remoteVersion != String(FIRMWARE_VERSION));
+    } else {
+      // Remote is a stable release.  Promote any dev/beta build ("-" present),
+      // or update if remote is strictly newer (e.g. device already on stable).
+      if (isDev) {
+        logf("FOTA      — promoting dev/beta build to stable\n");
+        shouldUpdate = true;
+      } else {
+        shouldUpdate = strcmp(remoteVersion.c_str(), FIRMWARE_VERSION) > 0;
+      }
+    }
   } else {
     // Stable: update only if remote is strictly newer.
     shouldUpdate = strcmp(remoteVersion.c_str(), FIRMWARE_VERSION) > 0;
