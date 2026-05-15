@@ -11,6 +11,18 @@
 #include "esp_sleep.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.8.0
+//  - Beta FOTA channel: sensors can be switched to "beta" update channel
+//    via HA, which tracks GitHub pre-releases (tagged 2.8.0-b01 etc.) rather
+//    than stable releases only. Version comparison on beta channel uses
+//    "different = update" semantics; stable channel unchanged.
+//  - Update on next wake: HA button publishes a retained MQTT flag to a
+//    dedicated topic; device receives it on next wake, clears the flag, and
+//    runs a FOTA check unconditionally (bypasses 24h gate and dev-build guard).
+//  - FOTA moved to after the MQTT listen phase so the force-update command
+//    received this wake takes effect this wake, not the next.
+//  - fwChannel config field persisted in NVS; exposed as HA select entity.
+//
 //  v2.7.0
 //  - Power optimisation: NTP re-sync skipped when ESP32 RTC already holds a
 //    valid time from the previous cycle (deep sleep preserves RTC). Full NTP
@@ -123,7 +135,8 @@
 // ═══════════════════════════════════════════════════════════
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
-#define FIRMWARE_VERSION "2.7.0"
+// Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
+#define FIRMWARE_VERSION "2.8.0-b01"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -164,12 +177,22 @@ const long  GMT_OFFSET_S = 0;
 const int   DST_OFFSET_S = 0;
 
 // ── FOTA ─────────────────────────────────────────────────
+// Stable channel: version.txt + binary from /releases/latest/download/
 const char* FOTA_VERSION_URL =
   "https://github.com/mcleancraig/moisture-sensor-esp32"
   "/releases/latest/download/version.txt";
 const char* FOTA_BIN_URL =
   "https://github.com/mcleancraig/moisture-sensor-esp32"
   "/releases/latest/download/moisture-sensor-esp32.ino.bin";
+// Beta channel: GitHub API /releases?per_page=1 returns the newest release
+// including pre-releases (which /releases/latest skips).
+const char* FOTA_RELEASES_API_URL =
+  "https://api.github.com/repos/mcleancraig/moisture-sensor-esp32"
+  "/releases?per_page=1";
+// Binary URL template for beta — tag substituted at runtime.
+const char* FOTA_BIN_URL_TMPL =
+  "https://github.com/mcleancraig/moisture-sensor-esp32"
+  "/releases/download/%s/moisture-sensor-esp32.ino.bin";
 
 // ── HA discovery prefix ───────────────────────────────────
 const char* HA_DISCOVERY_PREFIX = "homeassistant";
@@ -199,6 +222,8 @@ struct Config {
   int     moisturePin;   // default 0  (A0/GPIO0)
   int     batteryPin;    // default 1  (A1/GPIO1)
   int     reedPin;       // default 2  (D2/GPIO2)
+  // FOTA update channel — "stable" (default) or "beta"
+  char    fwChannel[8];  // selects stable (/releases/latest) or beta (/releases)
 } cfg;
 
 struct MoistureReading {
@@ -279,6 +304,9 @@ void loadConfig() {
   cfg.batteryPin  = prefs.getInt("batteryPin",  1);
   cfg.reedPin     = prefs.getInt("reedPin",     2);
 
+  prefs.getString("fwChannel", cfg.fwChannel, sizeof(cfg.fwChannel));
+  if (strlen(cfg.fwChannel) == 0) strlcpy(cfg.fwChannel, "stable", sizeof(cfg.fwChannel));
+
   prefs.end();
 
   configLoaded = (cfg.sensorNumber > 0 && strlen(cfg.wifiSSID) > 0 && strlen(cfg.mqttBroker) > 0);
@@ -311,6 +339,7 @@ void saveConfig(const Config& c) {
   prefs.putInt("moisturePin",   c.moisturePin);
   prefs.putInt("batteryPin",    c.batteryPin);
   prefs.putInt("reedPin",       c.reedPin);
+  prefs.putString("fwChannel",  c.fwChannel);
   prefs.end();
   logf("Config    — saved to NVS\n");
 }
@@ -348,6 +377,9 @@ char DISC_CFG_IP[128];
 char DISC_CFG_GW[128];
 char DISC_CFG_SN[128];
 char DISC_CFG_DNS[128];
+char UPDATE_TOPIC[64];        // garden/sensorN/update — retained flag for force-FOTA
+char DISC_BTN_UPDATE[128];    // HA button: Update on next wake
+char DISC_CFG_FW_CHANNEL[128]; // HA select: stable / beta
 
 void buildDerivedConfig() {
   snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.sensorNumber);
@@ -401,6 +433,12 @@ void buildDerivedConfig() {
     "%s/text/%s_cfg_sn/config",            HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_DNS,       sizeof(DISC_CFG_DNS),
     "%s/text/%s_cfg_dns/config",           HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(UPDATE_TOPIC,        sizeof(UPDATE_TOPIC),
+    "garden/%s/update",                    SENSOR_ID);
+  snprintf(DISC_BTN_UPDATE,     sizeof(DISC_BTN_UPDATE),
+    "%s/button/%s_update/config",          HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_CFG_FW_CHANNEL, sizeof(DISC_CFG_FW_CHANNEL),
+    "%s/select/%s_cfg_fw_channel/config",  HA_DISCOVERY_PREFIX, SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1112,17 +1150,27 @@ void startConfigPortal() {
 //  FOTA
 // ═══════════════════════════════════════════════════════════
 
+// Set by mqttCallback when a retained message arrives on UPDATE_TOPIC.
+// Consumed (and cleared) at the top of checkForUpdate().
+static bool fotaForceArmed = false;
+
 void checkForUpdate() {
-  if (strchr(FIRMWARE_VERSION, '-') != NULL) {
-    logf("FOTA      — skipped: development build (%s)\n", FIRMWARE_VERSION);
+  bool isBeta   = strcmp(cfg.fwChannel, "beta") == 0;
+  bool isDev    = strchr(FIRMWARE_VERSION, '-') != NULL;
+  bool isForced = fotaForceArmed;
+  fotaForceArmed = false;   // consume flag regardless of outcome
+
+  // Stable channel: skip dev/beta builds unless forced.
+  // If forced on stable, we fall through and promote to the latest stable.
+  if (!isBeta && isDev && !isForced) {
+    logf("FOTA      — skipped: dev build on stable channel (%s)\n", FIRMWARE_VERSION);
     return;
   }
 
-  // Throttle to once per 24 hours — avoids a TLS round-trip to GitHub on
-  // every wake when firmware is already current. lastFotaCheck is in RTC
-  // memory so it resets on hard reset / OTA restart, ensuring a check always
-  // happens on first wake after a firmware change.
-  if (hasValidEpoch() && lastFotaCheck > 0
+  // 24h gate — bypass when forced.
+  // lastFotaCheck resets on hard reset/OTA restart so a check always happens
+  // on first wake after a firmware change even without forcing.
+  if (!isForced && hasValidEpoch() && lastFotaCheck > 0
       && (time(nullptr) - lastFotaCheck) < 86400) {
     logf("FOTA      — skipped (checked %ldh ago)\n",
          (long)(time(nullptr) - lastFotaCheck) / 3600);
@@ -1133,62 +1181,128 @@ void checkForUpdate() {
   // off 24h rather than retrying every wake.
   if (hasValidEpoch()) lastFotaCheck = time(nullptr);
 
-  logf("FOTA      — checking for update...\n");
+  if (isForced) logf("FOTA      — forced check\n");
+  logf("FOTA      — checking for update (%s channel)...\n",
+       isBeta ? "beta" : "stable");
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(FOTA_VERSION_TIMEOUT_MS / 1000);         // socket read/write timeout (seconds)
-  client.setHandshakeTimeout(FOTA_VERSION_TIMEOUT_MS / 1000); // TLS handshake timeout (seconds)
-  // Note: setTimeout() does NOT cover the mbedTLS handshake phase — setHandshakeTimeout()
-  // is required to prevent an indefinite hang when GitHub CDN is slow to complete TLS.
+  client.setTimeout(FOTA_VERSION_TIMEOUT_MS / 1000);
+  client.setHandshakeTimeout(FOTA_VERSION_TIMEOUT_MS / 1000);
 
   HTTPClient http;
-  http.begin(client, FOTA_VERSION_URL);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(FOTA_VERSION_TIMEOUT_MS);
-  int code = http.GET();
+  String remoteVersion;
+  String binUrl;
 
-  if (code != 200) {
-    logf("FOTA      — version check failed (HTTP %d)\n", code);
+  if (isBeta) {
+    // ── Beta channel: GitHub API /releases?per_page=1 ─────────
+    // Returns the newest release including pre-releases (which
+    // /releases/latest skips). Parse "tag_name" from the JSON array.
+    http.begin(client, FOTA_RELEASES_API_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.addHeader("User-Agent",  "moisture-sensor-esp32");
+    http.addHeader("Accept",      "application/vnd.github.v3+json");
+    http.setTimeout(FOTA_VERSION_TIMEOUT_MS);
+    int code = http.GET();
+
+    if (code != 200) {
+      logf("FOTA      — API request failed (HTTP %d)\n", code);
+      http.end();
+      return;
+    }
+
+    String body = http.getString();
     http.end();
-    return;
+
+    // Parse first "tag_name":"..." from the JSON array
+    int idx = body.indexOf("\"tag_name\":\"");
+    if (idx < 0) {
+      logf("FOTA      — no releases found in API response\n");
+      return;
+    }
+    int start = idx + 12;   // skip past "tag_name":"
+    int end   = body.indexOf("\"", start);
+    if (end < 0) {
+      logf("FOTA      — malformed tag_name in API response\n");
+      return;
+    }
+    String tagFull = body.substring(start, end);  // e.g. "v2.8.0-b01"
+    remoteVersion = tagFull;
+    if (remoteVersion.startsWith("v")) remoteVersion = remoteVersion.substring(1);
+
+    // Construct binary download URL using the full tag (with 'v' if present)
+    char binBuf[220];
+    snprintf(binBuf, sizeof(binBuf), FOTA_BIN_URL_TMPL, tagFull.c_str());
+    binUrl = binBuf;
+
+  } else {
+    // ── Stable channel: version.txt from /releases/latest ─────
+    http.begin(client, FOTA_VERSION_URL);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setTimeout(FOTA_VERSION_TIMEOUT_MS);
+    int code = http.GET();
+
+    if (code != 200) {
+      logf("FOTA      — version check failed (HTTP %d)\n", code);
+      http.end();
+      return;
+    }
+
+    remoteVersion = http.getString();
+    remoteVersion.trim();
+    http.end();
+    binUrl = FOTA_BIN_URL;
   }
 
-  String remoteVersion = http.getString();
-  remoteVersion.trim();
-  http.end();
-
   logf("FOTA      — local: %s  remote: %s\n",
-    FIRMWARE_VERSION, remoteVersion.c_str());
+       FIRMWARE_VERSION, remoteVersion.c_str());
 
-  if (remoteVersion == FIRMWARE_VERSION) {
+  // ── Decide whether to update ──────────────────────────────
+  bool shouldUpdate = false;
+  if (isBeta) {
+    // Beta channel: only act when the API returned an actual pre-release.
+    // If no beta exists yet it returns the latest stable — sit tight.
+    bool remoteIsBeta = remoteVersion.indexOf("-b") >= 0;
+    if (remoteIsBeta) {
+      // dev→beta, beta→same-beta (no-op), beta→newer/older-beta
+      shouldUpdate = (remoteVersion != String(FIRMWARE_VERSION));
+    } else {
+      logf("FOTA      — no beta release available yet, staying put\n");
+      shouldUpdate = false;
+    }
+  } else {
+    // Stable: update only if remote is strictly newer.
+    shouldUpdate = strcmp(remoteVersion.c_str(), FIRMWARE_VERSION) > 0;
+    // Also promote if currently on any dev/beta build (has '-') and a stable
+    // release exists — covers the "switch channel back to stable" case.
+    if (!shouldUpdate && isDev && remoteVersion.length() > 0) {
+      logf("FOTA      — promoting dev/beta build to stable\n");
+      shouldUpdate = true;
+    }
+  }
+
+  if (!shouldUpdate) {
     logf("FOTA      — firmware is current, no update needed\n");
     return;
   }
 
   logf("FOTA      — update available: %s -> %s, downloading...\n",
-    FIRMWARE_VERSION, remoteVersion.c_str());
+       FIRMWARE_VERSION, remoteVersion.c_str());
 
-  // Fresh client for the binary download — longer timeout for large file.
-  // CDN redirect means a new TLS handshake — update both timeouts.
+  // Fresh client for the binary download — longer timeout, CDN redirect
+  // triggers a new TLS handshake so both timeouts must be updated.
   client.setTimeout(FOTA_DL_TIMEOUT_MS / 1000);
   client.setHandshakeTimeout(FOTA_DL_TIMEOUT_MS / 1000);
 
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  httpUpdate.onStart([]() {
-    logf("FOTA      — flashing...\n");
-  });
-  httpUpdate.onEnd([]() {
-    logf("FOTA      — flash complete\n");
-  });
-  httpUpdate.onError([](int e) {
-    logf("FOTA      — error: %d\n", e);
-  });
+  httpUpdate.onStart([]()         { logf("FOTA      — flashing...\n"); });
+  httpUpdate.onEnd([]()           { logf("FOTA      — flash complete\n"); });
+  httpUpdate.onError([](int e)    { logf("FOTA      — error: %d\n", e); });
   httpUpdate.onProgress([](int cur, int tot) {
-    Serial.printf("FOTA      — %d%%\r", (cur * 100) / tot);  // serial only, too noisy for syslog
+    Serial.printf("FOTA      — %d%%\r", (cur * 100) / tot);  // serial only
   });
 
-  t_httpUpdate_return result = httpUpdate.update(client, FOTA_BIN_URL);
+  t_httpUpdate_return result = httpUpdate.update(client, binUrl.c_str());
 
   switch (result) {
     case HTTP_UPDATE_FAILED:
@@ -1198,7 +1312,7 @@ void checkForUpdate() {
       logf("FOTA      — no update\n");
       break;
     case HTTP_UPDATE_OK:
-      break;   // restarts automatically
+      break;   // device restarts automatically
   }
 }
 
@@ -1438,6 +1552,7 @@ static char pendingIP[16]            = "";
 static char pendingGW[16]            = "";
 static char pendingSN[16]            = "";
 static char pendingDNS[16]           = "";
+static char pendingFwChannel[8]      = "";
 static uint16_t pendingFields        = 0;   // bitmask — which fields arrived this cycle
 #define PF_MQTT_BROKER    (1<<0)
 #define PF_MQTT_PORT      (1<<1)
@@ -1453,6 +1568,7 @@ static uint16_t pendingFields        = 0;   // bitmask — which fields arrived 
 #define PF_GW             (1<<11)
 #define PF_SN             (1<<12)
 #define PF_DNS            (1<<13)
+#define PF_FW_CHANNEL     (1<<14)
 
 // ── IMPORTANT: callback safety rules ────────────────────────
 // PubSubClient passes topic and payload as pointers INTO its internal buffer.
@@ -1470,6 +1586,15 @@ static uint16_t pendingFields        = 0;   // bitmask — which fields arrived 
 // All validation, cfg mutation, and logging happens in applyConfigChange()
 // outside the callback, after the listen loop completes.
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // ── Force-FOTA flag ───────────────────────────────────────
+  // UPDATE_TOPIC carries a retained "1" when the HA button is pressed.
+  // Set the in-memory flag here; the retained message is cleared outside
+  // the callback (see post-listen block in setup()) to obey callback safety rules.
+  if (strcmp(topic, UPDATE_TOPIC) == 0) {
+    if (length > 0) fotaForceArmed = true;
+    return;
+  }
+
   if (length == 0) return;
 
   if (strcmp(topic, CMD_TOPIC) == 0) {
@@ -1516,6 +1641,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     else if (strcmp(fieldName, "gw")          == 0) { strlcpy(pendingGW,          val, sizeof(pendingGW));          pendingFields |= PF_GW;           }
     else if (strcmp(fieldName, "sn")          == 0) { strlcpy(pendingSN,          val, sizeof(pendingSN));          pendingFields |= PF_SN;           }
     else if (strcmp(fieldName, "dns")         == 0) { strlcpy(pendingDNS,         val, sizeof(pendingDNS));         pendingFields |= PF_DNS;          }
+    else if (strcmp(fieldName, "fwChannel")   == 0) { strlcpy(pendingFwChannel,   val, sizeof(pendingFwChannel));   pendingFields |= PF_FW_CHANNEL;   }
     // Unknown fields silently ignored
   }
 }
@@ -1541,7 +1667,9 @@ void connectMqtt() {
       snprintf(configWildcard, sizeof(configWildcard), "%s/+", CONFIG_SET_PREFIX);
       mqtt.subscribe(CMD_TOPIC);
       mqtt.subscribe(configWildcard);
-      logf("MQTT      — subscribed to %s and %s\n", CMD_TOPIC, configWildcard);
+      mqtt.subscribe(UPDATE_TOPIC);
+      logf("MQTT      — subscribed to %s, %s and %s\n",
+           CMD_TOPIC, configWildcard, UPDATE_TOPIC);
     } else {
       logf("MQTT      — failed (rc=%d), retrying\n", mqtt.state());
       delay(500);
@@ -1727,6 +1855,18 @@ void publishDiscovery() {
       "\"icon\":\"mdi:restore\",%s}",
       SENSOR_ID, CMD_TOPIC, device));
 
+  // ── Button: Update on next wake ───────────────────────────
+  // Publishes a retained "1" to UPDATE_TOPIC when pressed.
+  // The sensor receives it on next wake, arms a forced FOTA check, and
+  // clears the retained message before running checkForUpdate().
+  publishMqttEntity(DISC_BTN_UPDATE, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Update on next wake\",\"unique_id\":\"%s_update\","
+      "\"command_topic\":\"%s\",\"payload_press\":\"1\","
+      "\"retain\":true,"
+      "\"icon\":\"mdi:cloud-download\",%s}",
+      SENSOR_ID, UPDATE_TOPIC, device));
+
   logf("Discovery — complete (sensors + buttons)\n");
 }
 
@@ -1758,18 +1898,20 @@ void publishConfigState() {
   snprintf(snStr,  sizeof(snStr),  "%d.%d.%d.%d", cfg.sn[0],  cfg.sn[1],  cfg.sn[2],  cfg.sn[3]);
   snprintf(dnsStr, sizeof(dnsStr), "%d.%d.%d.%d", cfg.dns[0], cfg.dns[1], cfg.dns[2], cfg.dns[3]);
 
-  char payload[512];
+  char payload[560];
   snprintf(payload, sizeof(payload),
     "{\"mqttBroker\":\"%s\",\"mqttPort\":%d,"
     "\"mqttUser\":\"%s\",\"mqttPassword\":\"***\","
     "\"syslogHost\":\"%s\",\"syslogPort\":%d,"
     "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d,"
-    "\"staticIP\":%s,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"dns\":\"%s\"}",
+    "\"staticIP\":%s,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"dns\":\"%s\","
+    "\"fwChannel\":\"%s\"}",
     cfg.mqttBroker, cfg.mqttPort,
     cfg.mqttUser,
     cfg.syslogHost, cfg.syslogPort,
     cfg.moisturePin, cfg.batteryPin, cfg.reedPin,
-    cfg.staticIP ? "true" : "false", ipStr, gwStr, snStr, dnsStr);
+    cfg.staticIP ? "true" : "false", ipStr, gwStr, snStr, dnsStr,
+    cfg.fwChannel);
   mqtt.publish(CONFIG_STATE_TOPIC, payload, true);
   mqtt.loop();
   logf("Config    — state published to %s\n", CONFIG_STATE_TOPIC);
@@ -1801,6 +1943,7 @@ void applyConfigChange() {
     if (pendingFields & PF_GW)          { snprintf(t, sizeof(t), "%s/gw",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_SN)          { snprintf(t, sizeof(t), "%s/sn",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_DNS)         { snprintf(t, sizeof(t), "%s/dns",         CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_FW_CHANNEL)  { snprintf(t, sizeof(t), "%s/fwChannel",  CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
   }
 
   bool changed = false;
@@ -1887,6 +2030,16 @@ void applyConfigChange() {
   if (pendingFields & PF_GW)  applyIPField(pendingGW,  cfg.gw,  "gw");
   if (pendingFields & PF_SN)  applyIPField(pendingSN,  cfg.sn,  "sn");
   if (pendingFields & PF_DNS) applyIPField(pendingDNS, cfg.dns, "dns");
+
+  if (pendingFields & PF_FW_CHANNEL) {
+    if (strcmp(pendingFwChannel, "stable") == 0 || strcmp(pendingFwChannel, "beta") == 0) {
+      strlcpy(cfg.fwChannel, pendingFwChannel, sizeof(cfg.fwChannel));
+      logf("Config    — fwChannel -> %s\n", pendingFwChannel);
+      changed = true;
+    } else {
+      logf("Config    — fwChannel rejected: must be 'stable' or 'beta'\n");
+    }
+  }
 
   if (changed) {
     saveConfig(cfg);
@@ -2036,6 +2189,21 @@ void publishConfigDiscovery() {
         device));
   }
 
+  // ── Select: Update Channel ───────────────────────────────
+  // Options: "stable" (default) or "beta". Retained so sleeping sensors
+  // pick up the change on next wake; HA select reflects current state via
+  // config/state topic.
+  publishMqttEntity(DISC_CFG_FW_CHANNEL, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Update Channel\",\"unique_id\":\"%s_cfg_fw_channel\","
+      "\"state_topic\":\"%s\","
+      "\"value_template\":\"{{ value_json.fwChannel }}\","
+      "\"command_topic\":\"%s/fwChannel\",\"retain\":true,"
+      "\"options\":[\"stable\",\"beta\"],"
+      "\"entity_category\":\"config\","
+      "\"icon\":\"mdi:update\",%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+
   logf("Discovery — config entities published\n");
 }
 
@@ -2113,10 +2281,9 @@ void setup() {
   syslogUdp.begin(0);   // bind to any local port before first beginPacket()
   syslogFlush();
 
-  // ── FOTA check — skipped on dev/test builds ───────────────
-  checkForUpdate();
-
   // ── MQTT ─────────────────────────────────────────────────
+  // FOTA runs after the MQTT listen phase (below) so force-update commands
+  // received this wake take effect this wake rather than the next one.
   connectMqtt();
   if (shouldPublishDiscovery()) {
     publishDiscovery();
@@ -2160,7 +2327,17 @@ void setup() {
 
     processMqttCommand();
     applyConfigChange();
+
+    // ── Clear retained force-update flag, then note it for FOTA below ──
+    if (fotaForceArmed) {
+      mqtt.publish(UPDATE_TOPIC, "", true);  // clear retained flag
+      mqtt.loop();
+      logf("FOTA      — force-update armed, checking now\n");
+    }
   }
+
+  // ── FOTA check (after MQTT so force-update command takes effect this wake) ──
+  checkForUpdate();
 
   mqtt.disconnect();
   goToSleep();
