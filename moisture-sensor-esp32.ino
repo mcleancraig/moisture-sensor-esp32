@@ -136,7 +136,7 @@
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "2.8.0-b01"
+#define FIRMWARE_VERSION "2.8.0-b02"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -1155,14 +1155,15 @@ void startConfigPortal() {
 static bool fotaForceArmed = false;
 
 void checkForUpdate() {
-  bool isBeta   = strcmp(cfg.fwChannel, "beta") == 0;
-  bool isDev    = strchr(FIRMWARE_VERSION, '-') != NULL;
-  bool isForced = fotaForceArmed;
+  bool isBeta      = strcmp(cfg.fwChannel, "beta") == 0;
+  bool isDev       = strchr(FIRMWARE_VERSION, '-') != NULL;  // any non-release build
+  bool isDevBuild  = strstr(FIRMWARE_VERSION, "-dev.") != NULL;  // dev SHA builds only
+  bool isForced    = fotaForceArmed;
   fotaForceArmed = false;   // consume flag regardless of outcome
 
-  // Stable channel: skip dev/beta builds unless forced.
-  // If forced on stable, we fall through and promote to the latest stable.
-  if (!isBeta && isDev && !isForced) {
+  // Stable channel: skip *dev* builds unless forced (beta builds like 2.8.0-b01
+  // must be allowed through so they can promote back to the latest stable).
+  if (!isBeta && isDevBuild && !isForced) {
     logf("FOTA      — skipped: dev build on stable channel (%s)\n", FIRMWARE_VERSION);
     return;
   }
