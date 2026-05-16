@@ -383,6 +383,7 @@ char DISC_BTN_RESTART[128];
 char DISC_BTN_RESET[128];
 char DISC_BAT_LOW[128];
 char DISC_FW[128];
+char DISC_RSSI[128];
 char CONFIG_SET_PREFIX[80];   // garden/sensorN/config/set  (subscribe as .../+)
 char CONFIG_STATE_TOPIC[80];  // garden/sensorN/config/state
 char DISC_CFG_MQTT_BROKER[128];
@@ -425,6 +426,8 @@ void buildDerivedConfig() {
     "%s/binary_sensor/%s_battery_low/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_FW, sizeof(DISC_FW),
     "%s/sensor/%s_fw/config",                 HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_RSSI, sizeof(DISC_RSSI),
+    "%s/sensor/%s_rssi/config",               HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(CONFIG_SET_PREFIX,  sizeof(CONFIG_SET_PREFIX),  "garden/%s/config/set",    SENSOR_ID);
   snprintf(CONFIG_STATE_TOPIC, sizeof(CONFIG_STATE_TOPIC), "garden/%s/config/state",  SENSOR_ID);
   snprintf(DISC_CFG_MQTT_BROKER, sizeof(DISC_CFG_MQTT_BROKER),
@@ -1869,6 +1872,15 @@ void publishDiscovery() {
       "{\"name\":\"Firmware Version\",\"unique_id\":\"%s_fw\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.fw_version }}\","
       "\"icon\":\"mdi:chip\",%s}",
+      SENSOR_ID, STATE_TOPIC, device));
+
+  publishMqttEntity(DISC_RSSI, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"RSSI\",\"unique_id\":\"%s_rssi\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.rssi }}\","
+      "\"device_class\":\"signal_strength\",\"unit_of_measurement\":\"dBm\","
+      "\"state_class\":\"measurement\","
+      "\"icon\":\"mdi:wifi\",%s}",
       SENSOR_ID, STATE_TOPIC, device));
 
   // ── Button: Restart ──────────────────────────────────────
