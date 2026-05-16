@@ -4,3 +4,4 @@ version.txt
 .DS_Store
 build/
 .claude/
+*.bin

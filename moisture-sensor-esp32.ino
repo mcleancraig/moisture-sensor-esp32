@@ -11,6 +11,16 @@
 #include "esp_sleep.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.9.0
+//  - Cross-repo standardisation:
+//    sensorNumber renamed to unitNumber (NVS key unchanged — no factory reset);
+//    state payload fw → fw_version, add rssi field;
+//    semver comparison fixed (strcmp fails when minor ≥ 10);
+//    full wake/reset-reason logging (timer, GPIO, cold boot, panics);
+//    heap monitoring at boot and post-FOTA;
+//    validateConfig() pin-conflict check at boot;
+//    HA discovery published log; MQTT connect log includes port.
+//
 //  v2.8.0
 //  - Beta FOTA channel: sensors can be switched to "beta" update channel
 //    via HA, which tracks GitHub pre-releases (tagged 2.8.0-b01 etc.) rather
@@ -136,7 +146,7 @@
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "2.8.0"
+#define FIRMWARE_VERSION "2.9.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -204,7 +214,7 @@ const char* HA_DISCOVERY_PREFIX = "homeassistant";
 Preferences prefs;
 
 struct Config {
-  int     sensorNumber;
+  int     unitNumber;
   char    wifiSSID[64];
   char    wifiPassword[64];
   bool    staticIP;
@@ -268,7 +278,7 @@ void loadConfig() {
   }
 
   prefs.begin("sensor", true);
-  cfg.sensorNumber = prefs.getInt("sensorNum", 0);
+  cfg.unitNumber = prefs.getInt("sensorNum", 0);
   prefs.getString("wifiSSID",   cfg.wifiSSID,    sizeof(cfg.wifiSSID));
   prefs.getString("wifiPass",   cfg.wifiPassword,sizeof(cfg.wifiPassword));
   cfg.staticIP  = prefs.getBool("staticIP", false);
@@ -309,7 +319,20 @@ void loadConfig() {
 
   prefs.end();
 
-  configLoaded = (cfg.sensorNumber > 0 && strlen(cfg.wifiSSID) > 0 && strlen(cfg.mqttBroker) > 0);
+  configLoaded = (cfg.unitNumber > 0 && strlen(cfg.wifiSSID) > 0 && strlen(cfg.mqttBroker) > 0);
+}
+
+void validateConfig() {
+  const int pins[]        = { cfg.moisturePin, cfg.batteryPin, cfg.reedPin };
+  const char* names[]     = { "moisturePin", "batteryPin", "reedPin" };
+  for (int i = 0; i < 3; i++) {
+    for (int j = i + 1; j < 3; j++) {
+      if (pins[i] == pins[j]) {
+        logf("Config    — WARNING: %s and %s share GPIO%d\n",
+             names[i], names[j], pins[i]);
+      }
+    }
+  }
 }
 
 void clearConfig() {
@@ -322,7 +345,7 @@ void clearConfig() {
 void saveConfig(const Config& c) {
   prefs.begin("sensor", false);
   prefs.putString(NVS_MAGIC_KEY, NVS_MAGIC_VALUE);
-  prefs.putInt("sensorNum",     c.sensorNumber);
+  prefs.putInt("sensorNum",     c.unitNumber);
   prefs.putString("wifiSSID",   c.wifiSSID);
   prefs.putString("wifiPass",   c.wifiPassword);
   prefs.putBool("staticIP",     c.staticIP);
@@ -360,6 +383,7 @@ char DISC_BTN_RESTART[128];
 char DISC_BTN_RESET[128];
 char DISC_BAT_LOW[128];
 char DISC_FW[128];
+char DISC_RSSI[128];
 char CONFIG_SET_PREFIX[80];   // garden/sensorN/config/set  (subscribe as .../+)
 char CONFIG_STATE_TOPIC[80];  // garden/sensorN/config/state
 char DISC_CFG_MQTT_BROKER[128];
@@ -382,8 +406,8 @@ char DISC_BTN_UPDATE[128];    // HA button: Update on next wake
 char DISC_CFG_FW_CHANNEL[128]; // HA select: stable / beta
 
 void buildDerivedConfig() {
-  snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.sensorNumber);
-  snprintf(SENSOR_NAME, sizeof(SENSOR_NAME), "Garden Moisture Sensor %d", cfg.sensorNumber);
+  snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.unitNumber);
+  snprintf(SENSOR_NAME, sizeof(SENSOR_NAME), "Garden Moisture Sensor %d", cfg.unitNumber);
   snprintf(STATE_TOPIC, sizeof(STATE_TOPIC), "garden/%s/state",           SENSOR_ID);
   snprintf(CMD_TOPIC,   sizeof(CMD_TOPIC),   "garden/%s/cmd",             SENSOR_ID);
   snprintf(DISC_MOISTURE, sizeof(DISC_MOISTURE),
@@ -402,6 +426,8 @@ void buildDerivedConfig() {
     "%s/binary_sensor/%s_battery_low/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_FW, sizeof(DISC_FW),
     "%s/sensor/%s_fw/config",                 HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_RSSI, sizeof(DISC_RSSI),
+    "%s/sensor/%s_rssi/config",               HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(CONFIG_SET_PREFIX,  sizeof(CONFIG_SET_PREFIX),  "garden/%s/config/set",    SENSOR_ID);
   snprintf(CONFIG_STATE_TOPIC, sizeof(CONFIG_STATE_TOPIC), "garden/%s/config/state",  SENSOR_ID);
   snprintf(DISC_CFG_MQTT_BROKER, sizeof(DISC_CFG_MQTT_BROKER),
@@ -1052,7 +1078,7 @@ void handleSave() {
   int sensorNum = server.arg("sensorNum").toInt();
 
   Config c = {};
-  c.sensorNumber = sensorNum;
+  c.unitNumber = sensorNum;
   strlcpy(c.wifiSSID,    server.arg("ssid").c_str(),       sizeof(c.wifiSSID));
   strlcpy(c.wifiPassword,server.arg("wifiPass").c_str(),   sizeof(c.wifiPassword));
   c.staticIP = server.hasArg("staticIP");
@@ -1153,6 +1179,28 @@ void startConfigPortal() {
 // Set by mqttCallback when a retained message arrives on UPDATE_TOPIC.
 // Consumed (and cleared) at the top of checkForUpdate().
 static bool fotaForceArmed = false;
+
+// Compare version strings numerically. Returns true if remote > local.
+// Handles X.Y.Z and X.Y.Z-bNN (beta) suffixes:
+//   stable > beta of same version  (2.9.0 > 2.9.0-b02)
+//   higher beta > lower beta       (2.9.0-b02 > 2.9.0-b01)
+// strcmp() fails once any component reaches 10+.
+static bool isNewerVersion(const String& remote, const String& local) {
+  int rMaj = 0, rMin = 0, rPatch = 0;
+  int lMaj = 0, lMin = 0, lPatch = 0;
+  sscanf(remote.c_str(), "%d.%d.%d", &rMaj, &rMin, &rPatch);
+  sscanf(local.c_str(),  "%d.%d.%d", &lMaj, &lMin, &lPatch);
+  if (rMaj != lMaj) return rMaj > lMaj;
+  if (rMin != lMin) return rMin > lMin;
+  if (rPatch != lPatch) return rPatch > lPatch;
+  // Same triplet — compare -bNN suffix. No suffix = stable = highest.
+  const char* rB = strstr(remote.c_str(), "-b");
+  const char* lB = strstr(local.c_str(),  "-b");
+  if (!rB && !lB) return false;   // both stable, equal
+  if (!rB &&  lB) return true;    // remote stable, local beta → remote newer
+  if ( rB && !lB) return false;   // remote beta, local stable → not newer
+  return atoi(rB + 2) > atoi(lB + 2);  // both beta: compare number
+}
 
 void checkForUpdate() {
   bool isBeta      = strcmp(cfg.fwChannel, "beta") == 0;
@@ -1265,7 +1313,7 @@ void checkForUpdate() {
     // If no beta exists yet it returns the latest stable — sit tight.
     bool remoteIsBeta = remoteVersion.indexOf("-b") >= 0;
     if (remoteIsBeta) {
-      shouldUpdate = (remoteVersion != String(FIRMWARE_VERSION));
+      shouldUpdate = isNewerVersion(remoteVersion, String(FIRMWARE_VERSION));
       if (shouldUpdate && !isDev) {
         // Currently on a stable build, switching to beta channel
         logf("FOTA      — switching from stable to beta build\n");
@@ -1276,7 +1324,7 @@ void checkForUpdate() {
     }
   } else {
     // Stable: update only if remote is strictly newer.
-    shouldUpdate = strcmp(remoteVersion.c_str(), FIRMWARE_VERSION) > 0;
+    shouldUpdate = isNewerVersion(remoteVersion, String(FIRMWARE_VERSION));
     // Also covers the "switched channel back to stable" case for dev/beta builds.
     if (!shouldUpdate && isDev && remoteVersion.length() > 0) {
       logf("FOTA      — switching from beta to stable build\n");
@@ -1655,8 +1703,8 @@ void connectMqtt() {
   mqtt.setSocketTimeout(MQTT_TIMEOUT_S);  // caps TCP connect per attempt
   mqtt.setCallback(mqttCallback);
   String clientId = String("garden-") + SENSOR_ID;
-  logf("MQTT      — connecting to %s as %s\n",
-    cfg.mqttBroker, clientId.c_str());
+  logf("MQTT      — connecting to %s:%d as %s\n",
+    cfg.mqttBroker, cfg.mqttPort, clientId.c_str());
 
   int attempts = 0;
   while (!mqtt.connected() && attempts < 5) {
@@ -1832,8 +1880,17 @@ void publishDiscovery() {
   publishMqttEntity(DISC_FW, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Firmware Version\",\"unique_id\":\"%s_fw\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.fw }}\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.fw_version }}\","
       "\"icon\":\"mdi:chip\",%s}",
+      SENSOR_ID, STATE_TOPIC, device));
+
+  publishMqttEntity(DISC_RSSI, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"RSSI\",\"unique_id\":\"%s_rssi\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.rssi }}\","
+      "\"device_class\":\"signal_strength\",\"unit_of_measurement\":\"dBm\","
+      "\"state_class\":\"measurement\","
+      "\"icon\":\"mdi:wifi\",%s}",
       SENSOR_ID, STATE_TOPIC, device));
 
   // ── Button: Restart ──────────────────────────────────────
@@ -2207,7 +2264,7 @@ void publishConfigDiscovery() {
       "\"icon\":\"mdi:update\",%s}",
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
-  logf("Discovery — config entities published\n");
+  logf("MQTT      — HA discovery published\n");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2224,12 +2281,27 @@ void setup() {
 
   // ── Load config first so syslog server address is available ──
   loadConfig();
+  validateConfig();
+
+  // ── Wake / reset reason ───────────────────────────────────
+  esp_reset_reason_t resetReason = esp_reset_reason();
+  if (resetReason != ESP_RST_DEEPSLEEP) {
+    logf("Boot      — v%s reset_reason=%d\n", FIRMWARE_VERSION, (int)resetReason);
+  }
+  switch (esp_sleep_get_wakeup_cause()) {
+    case ESP_SLEEP_WAKEUP_TIMER:
+      logf("Wake      — timer\n");
+      break;
+    case ESP_SLEEP_WAKEUP_GPIO:
+      logf("Wake      — GPIO (reed switch)\n");
+      break;
+    default:
+      logf("Wake      — cold boot or unexpected (cause=%d)\n",
+           (int)esp_sleep_get_wakeup_cause());
+      break;
+  }
 
   // ── Reed switch check ─────────────────────────────────────
-  // Log if we were woken by the reed switch rather than the timer.
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
-    logf("Wake      — GPIO wakeup (reed switch)\n");
-  }
   checkReedSwitch();
 
   // ── Boot button check — hold for 3s to force reconfiguration ──
@@ -2259,7 +2331,7 @@ void setup() {
 
   buildDerivedConfig();
   logf("Config    — sensor%d, SSID: %s, broker: %s\n",
-    cfg.sensorNumber, cfg.wifiSSID, cfg.mqttBroker);
+    cfg.unitNumber, cfg.wifiSSID, cfg.mqttBroker);
 
   // ── Read sensors before WiFi — radio noise affects ADC ───
   // Set ADC attenuation once here (after config load so we have the right pin).
@@ -2283,6 +2355,7 @@ void setup() {
   // ── Flush buffered boot messages to syslog (after NTP for real timestamps) ──
   syslogUdp.begin(0);   // bind to any local port before first beginPacket()
   syslogFlush();
+  logf("Heap      — free: %u bytes (min: %u)\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
 
   // ── MQTT ─────────────────────────────────────────────────
   // FOTA runs after the MQTT listen phase (below) so force-update commands
@@ -2295,52 +2368,54 @@ void setup() {
   }
   publishConfigState();   // always publish — HA config entities read from this
 
-  if (mqtt.connected()) {
-    char timestamp[32];
-    getTimestamp(timestamp, sizeof(timestamp));
+  // connectMqtt() sleeps on failure, so we are always connected here.
+  char timestamp[32];
+  getTimestamp(timestamp, sizeof(timestamp));
 
-    char payload[384];
-    if (batV > 0) {
-      snprintf(payload, sizeof(payload),
-        "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
-        "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":%.2f,"
-        "\"battery_pct\":%d,\"battery_raw_mv\":%d,\"fw\":\"%s\",\"ts\":\"%s\"}",
-        SENSOR_ID, moisture.percent, moisture.rawMv,
-        DRY_MV, WET_MV, batV, batPct, batRawMv,
-        FIRMWARE_VERSION, timestamp);
-    } else {
-      snprintf(payload, sizeof(payload),
-        "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
-        "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":null,"
-        "\"battery_pct\":null,\"battery_raw_mv\":%d,\"fw\":\"%s\",\"ts\":\"%s\"}",
-        SENSOR_ID, moisture.percent, moisture.rawMv,
-        DRY_MV, WET_MV, batRawMv,
-        FIRMWARE_VERSION, timestamp);
-    }
-    bool ok = mqtt.publish(STATE_TOPIC, payload, true);
-    logf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
+  char payload[512];
+  if (batV > 0) {
+    snprintf(payload, sizeof(payload),
+      "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
+      "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":%.2f,"
+      "\"battery_pct\":%d,\"battery_raw_mv\":%d,\"rssi\":%d,"
+      "\"fw_version\":\"%s\",\"ts\":\"%s\"}",
+      SENSOR_ID, moisture.percent, moisture.rawMv,
+      DRY_MV, WET_MV, batV, batPct, batRawMv, WiFi.RSSI(),
+      FIRMWARE_VERSION, timestamp);
+  } else {
+    snprintf(payload, sizeof(payload),
+      "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
+      "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":null,"
+      "\"battery_pct\":null,\"battery_raw_mv\":%d,\"rssi\":%d,"
+      "\"fw_version\":\"%s\",\"ts\":\"%s\"}",
+      SENSOR_ID, moisture.percent, moisture.rawMv,
+      DRY_MV, WET_MV, batRawMv, WiFi.RSSI(),
+      FIRMWARE_VERSION, timestamp);
+  }
+  bool ok = mqtt.publish(STATE_TOPIC, payload, true);
+  logf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
 
-    // ── Listen for incoming commands ──────────────────────
-    logf("MQTT      — listening for commands...\n");
-    unsigned long listenDeadline = millis() + CMD_LISTEN_MS;
-    while (millis() < listenDeadline) {
-      mqtt.loop();
-      delay(10);
-    }
+  // ── Listen for incoming commands ────────────────────────
+  logf("MQTT      — listening for commands...\n");
+  unsigned long listenDeadline = millis() + CMD_LISTEN_MS;
+  while (millis() < listenDeadline) {
+    mqtt.loop();
+    delay(10);
+  }
 
-    processMqttCommand();
-    applyConfigChange();
+  processMqttCommand();
+  applyConfigChange();
 
-    // ── Clear retained force-update flag, then note it for FOTA below ──
-    if (fotaForceArmed) {
-      mqtt.publish(UPDATE_TOPIC, "", true);  // clear retained flag
-      mqtt.loop();
-      logf("FOTA      — force-update armed, checking now\n");
-    }
+  // ── Clear retained force-update flag, then note it for FOTA below ──
+  if (fotaForceArmed) {
+    mqtt.publish(UPDATE_TOPIC, "", true);  // clear retained flag
+    mqtt.loop();
+    logf("FOTA      — force-update armed, checking now\n");
   }
 
   // ── FOTA check (after MQTT so force-update command takes effect this wake) ──
   checkForUpdate();
+  logf("Heap      — free: %u bytes (min: %u)\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
 
   mqtt.disconnect();
   goToSleep();
