@@ -36,6 +36,10 @@ views:
                     entity: sensor.garden_moisture_sensor_99_firmware_version
                     icon: mdi:chip
                     content_info: state
+                  - type: entity
+                    entity: sensor.garden_moisture_sensor_99_rssi
+                    icon: mdi:wifi
+                    content_info: state
         column_span: 1
         background:
           color: yellow
@@ -75,6 +79,10 @@ views:
                     entity: sensor.garden_moisture_sensor_1_firmware_version
                     icon: mdi:chip
                     content_info: state
+                  - type: entity
+                    entity: sensor.garden_moisture_sensor_1_rssi
+                    icon: mdi:wifi
+                    content_info: state
       - type: grid
         cards:
           - type: vertical-stack
@@ -109,6 +117,10 @@ views:
                     entity: sensor.garden_moisture_sensor_2_firmware_version
                     icon: mdi:chip
                     content_info: state
+                  - type: entity
+                    entity: sensor.garden_moisture_sensor_2_rssi
+                    icon: mdi:wifi
+                    content_info: state
       - type: grid
         cards:
           - type: vertical-stack
@@ -134,12 +146,18 @@ views:
                       type: entity
                     entity: sensor.garden_moisture_sensor_3_battery
               - type: entity
-                entity: sensor.garden_sensor_3_last_seen
+                entity: sensor.garden_moisture_sensor_3_last_seen
+                name:
+                  type: entity
               - type: custom:mushroom-chips-card
                 chips:
                   - type: entity
                     entity: sensor.garden_moisture_sensor_3_firmware_version
                     icon: mdi:chip
+                    content_info: state
+                  - type: entity
+                    entity: sensor.garden_moisture_sensor_3_rssi
+                    icon: mdi:wifi
                     content_info: state
       - type: grid
         cards:
@@ -166,7 +184,7 @@ views:
                       type: entity
                     entity: sensor.garden_moisture_sensor_4_battery
               - type: entity
-                entity: sensor.garden_sensor_4_last_seen
+                entity: sensor.garden_moisture_sensor_4_last_seen
                 name:
                   type: entity
               - type: custom:mushroom-chips-card
@@ -174,6 +192,10 @@ views:
                   - type: entity
                     entity: sensor.garden_moisture_sensor_4_firmware_version
                     icon: mdi:chip
+                    content_info: state
+                  - type: entity
+                    entity: sensor.garden_moisture_sensor_4_rssi
+                    icon: mdi:wifi
                     content_info: state
       - type: grid
         cards:
@@ -208,6 +230,10 @@ views:
                   - type: entity
                     entity: sensor.garden_moisture_sensor_77_firmware_version
                     icon: mdi:chip
+                    content_info: state
+                  - type: entity
+                    entity: sensor.garden_moisture_sensor_77_rssi
+                    icon: mdi:wifi
                     content_info: state
     max_columns: 4
     title: Moisture
