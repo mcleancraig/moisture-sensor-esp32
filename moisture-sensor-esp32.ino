@@ -2295,48 +2295,47 @@ void setup() {
   }
   publishConfigState();   // always publish — HA config entities read from this
 
-  if (mqtt.connected()) {
-    char timestamp[32];
-    getTimestamp(timestamp, sizeof(timestamp));
+  // connectMqtt() sleeps on failure, so we are always connected here.
+  char timestamp[32];
+  getTimestamp(timestamp, sizeof(timestamp));
 
-    char payload[384];
-    if (batV > 0) {
-      snprintf(payload, sizeof(payload),
-        "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
-        "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":%.2f,"
-        "\"battery_pct\":%d,\"battery_raw_mv\":%d,\"fw\":\"%s\",\"ts\":\"%s\"}",
-        SENSOR_ID, moisture.percent, moisture.rawMv,
-        DRY_MV, WET_MV, batV, batPct, batRawMv,
-        FIRMWARE_VERSION, timestamp);
-    } else {
-      snprintf(payload, sizeof(payload),
-        "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
-        "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":null,"
-        "\"battery_pct\":null,\"battery_raw_mv\":%d,\"fw\":\"%s\",\"ts\":\"%s\"}",
-        SENSOR_ID, moisture.percent, moisture.rawMv,
-        DRY_MV, WET_MV, batRawMv,
-        FIRMWARE_VERSION, timestamp);
-    }
-    bool ok = mqtt.publish(STATE_TOPIC, payload, true);
-    logf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
+  char payload[384];
+  if (batV > 0) {
+    snprintf(payload, sizeof(payload),
+      "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
+      "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":%.2f,"
+      "\"battery_pct\":%d,\"battery_raw_mv\":%d,\"fw\":\"%s\",\"ts\":\"%s\"}",
+      SENSOR_ID, moisture.percent, moisture.rawMv,
+      DRY_MV, WET_MV, batV, batPct, batRawMv,
+      FIRMWARE_VERSION, timestamp);
+  } else {
+    snprintf(payload, sizeof(payload),
+      "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
+      "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":null,"
+      "\"battery_pct\":null,\"battery_raw_mv\":%d,\"fw\":\"%s\",\"ts\":\"%s\"}",
+      SENSOR_ID, moisture.percent, moisture.rawMv,
+      DRY_MV, WET_MV, batRawMv,
+      FIRMWARE_VERSION, timestamp);
+  }
+  bool ok = mqtt.publish(STATE_TOPIC, payload, true);
+  logf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
 
-    // ── Listen for incoming commands ──────────────────────
-    logf("MQTT      — listening for commands...\n");
-    unsigned long listenDeadline = millis() + CMD_LISTEN_MS;
-    while (millis() < listenDeadline) {
-      mqtt.loop();
-      delay(10);
-    }
+  // ── Listen for incoming commands ────────────────────────
+  logf("MQTT      — listening for commands...\n");
+  unsigned long listenDeadline = millis() + CMD_LISTEN_MS;
+  while (millis() < listenDeadline) {
+    mqtt.loop();
+    delay(10);
+  }
 
-    processMqttCommand();
-    applyConfigChange();
+  processMqttCommand();
+  applyConfigChange();
 
-    // ── Clear retained force-update flag, then note it for FOTA below ──
-    if (fotaForceArmed) {
-      mqtt.publish(UPDATE_TOPIC, "", true);  // clear retained flag
-      mqtt.loop();
-      logf("FOTA      — force-update armed, checking now\n");
-    }
+  // ── Clear retained force-update flag, then note it for FOTA below ──
+  if (fotaForceArmed) {
+    mqtt.publish(UPDATE_TOPIC, "", true);  // clear retained flag
+    mqtt.loop();
+    logf("FOTA      — force-update armed, checking now\n");
   }
 
   // ── FOTA check (after MQTT so force-update command takes effect this wake) ──
