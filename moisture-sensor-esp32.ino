@@ -11,6 +11,25 @@
 #include "esp_sleep.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.10.1
+//  - First boot delay bug fixes:
+//    (a) handleSave() built Config c={} (zero-init), writing firstBootDelayMin=0
+//        to NVS and discarding the 15-min default. Fixed: handleSave() now
+//        copies firstBootDelayMin from the current cfg before saving.
+//    (b) After portal config, ESP.restart() produces reset_reason=SW (3), not
+//        ESP_RST_POWERON (1), so the post-portal boot never triggered the delay.
+//        Fixed: handleSave() sets a one-shot NVS flag (firstBootPend); setup()
+//        checks both ESP_RST_POWERON and that flag to determine isFirstBootDelay.
+//
+//  v2.10.0
+//  - First boot delay: on power-cycle cold boot the device publishes all
+//    stats except moisture, then sleeps for firstBootDelayMin (default 15)
+//    before waking for the first full data set. This prevents a spurious
+//    near-zero moisture reading while the sensor is still in open air after
+//    battery insertion. firstBootDelayMin is configurable via HA/MQTT
+//    (0 = disabled). Only triggered by ESP_RST_POWERON; warm resets and
+//    deep-sleep wakes follow the normal cycle.
+//
 //  v2.9.0
 //  - Cross-repo standardisation:
 //    sensorNumber renamed to unitNumber (NVS key unchanged — no factory reset);
@@ -146,7 +165,7 @@
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "2.9.0"
+#define FIRMWARE_VERSION "2.10.1"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -234,6 +253,8 @@ struct Config {
   int     reedPin;       // default 2  (D2/GPIO2)
   // FOTA update channel — "stable" (default) or "beta"
   char    fwChannel[8];  // selects stable (/releases/latest) or beta (/releases)
+  // First cold-boot delay — minutes to sleep before sending first full reading
+  int     firstBootDelayMin;  // default 15; 0 = disabled
 } cfg;
 
 struct MoistureReading {
@@ -317,6 +338,8 @@ void loadConfig() {
   prefs.getString("fwChannel", cfg.fwChannel, sizeof(cfg.fwChannel));
   if (strlen(cfg.fwChannel) == 0) strlcpy(cfg.fwChannel, "stable", sizeof(cfg.fwChannel));
 
+  cfg.firstBootDelayMin = prefs.getInt("firstBootMin", 15);
+
   prefs.end();
 
   configLoaded = (cfg.unitNumber > 0 && strlen(cfg.wifiSSID) > 0 && strlen(cfg.mqttBroker) > 0);
@@ -342,6 +365,17 @@ void clearConfig() {
   logf("Config    — NVS cleared\n");
 }
 
+// Reads and atomically clears the one-shot "first boot pending" flag.
+// Set by handleSave() so the post-portal SW restart triggers the first-boot delay
+// even though its reset_reason is SW (3) rather than POWERON (1).
+static bool checkAndClearFirstBootPending() {
+  prefs.begin("sensor", false);
+  bool pending = prefs.getBool("firstBootPend", false);
+  if (pending) prefs.putBool("firstBootPend", false);
+  prefs.end();
+  return pending;
+}
+
 void saveConfig(const Config& c) {
   prefs.begin("sensor", false);
   prefs.putString(NVS_MAGIC_KEY, NVS_MAGIC_VALUE);
@@ -363,6 +397,7 @@ void saveConfig(const Config& c) {
   prefs.putInt("batteryPin",    c.batteryPin);
   prefs.putInt("reedPin",       c.reedPin);
   prefs.putString("fwChannel",  c.fwChannel);
+  prefs.putInt("firstBootMin",  c.firstBootDelayMin);
   prefs.end();
   logf("Config    — saved to NVS\n");
 }
@@ -404,6 +439,7 @@ char DISC_CFG_DNS[128];
 char UPDATE_TOPIC[64];        // garden/sensorN/update — retained flag for force-FOTA
 char DISC_BTN_UPDATE[128];    // HA button: Update on next wake
 char DISC_CFG_FW_CHANNEL[128]; // HA select: stable / beta
+char DISC_CFG_FIRST_BOOT_DELAY[128]; // HA number: first boot delay minutes
 
 void buildDerivedConfig() {
   snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.unitNumber);
@@ -465,6 +501,8 @@ void buildDerivedConfig() {
     "%s/button/%s_update/config",          HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_FW_CHANNEL, sizeof(DISC_CFG_FW_CHANNEL),
     "%s/select/%s_cfg_fw_channel/config",  HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_CFG_FIRST_BOOT_DELAY, sizeof(DISC_CFG_FIRST_BOOT_DELAY),
+    "%s/number/%s_cfg_first_boot_delay/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1113,7 +1151,16 @@ void handleSave() {
   c.batteryPin  = server.arg("batteryPin").toInt();
   c.reedPin     = server.arg("reedPin").toInt();
 
+  // Preserve MQTT-only fields that have no portal form input.
+  c.firstBootDelayMin = cfg.firstBootDelayMin;
+
   saveConfig(c);
+
+  // One-shot flag: the post-portal ESP.restart() has reset_reason=SW, not POWERON.
+  // This flag tells setup() to treat that restart as a first-boot-delay boot.
+  prefs.begin("sensor", false);
+  prefs.putBool("firstBootPend", true);
+  prefs.end();
 
   server.send_P(200, "text/html", SAVED_HTML);
   delay(1500);
@@ -1471,8 +1518,8 @@ void checkReedSwitch() {
 //  SENSORS
 // ═══════════════════════════════════════════════════════════
 
-void goToSleep() {
-  logf("Sleep     — going to sleep for %d minutes\n", SLEEP_MINUTES);
+void goToSleep(int minutes) {
+  logf("Sleep     — going to sleep for %d minutes\n", minutes);
 
   // Enable GPIO wakeup so a magnet presentation wakes the device immediately.
   // INPUT_PULLUP keeps the pin HIGH (reed open); closing to GND fires the wake.
@@ -1481,7 +1528,7 @@ void goToSleep() {
   esp_deep_sleep_enable_gpio_wakeup(1ULL << cfg.reedPin, ESP_GPIO_WAKEUP_GPIO_LOW);
 
   Serial.flush();
-  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60 * 1000000ULL);
+  esp_sleep_enable_timer_wakeup((uint64_t)minutes * 60 * 1000000ULL);
   esp_deep_sleep_start();
 }
 
@@ -1604,6 +1651,7 @@ static char pendingGW[16]            = "";
 static char pendingSN[16]            = "";
 static char pendingDNS[16]           = "";
 static char pendingFwChannel[8]      = "";
+static char pendingFirstBootDelay[8] = "";
 static uint16_t pendingFields        = 0;   // bitmask — which fields arrived this cycle
 #define PF_MQTT_BROKER    (1<<0)
 #define PF_MQTT_PORT      (1<<1)
@@ -1619,7 +1667,8 @@ static uint16_t pendingFields        = 0;   // bitmask — which fields arrived 
 #define PF_GW             (1<<11)
 #define PF_SN             (1<<12)
 #define PF_DNS            (1<<13)
-#define PF_FW_CHANNEL     (1<<14)
+#define PF_FW_CHANNEL          (1<<14)
+#define PF_FIRST_BOOT_DELAY    (1<<15)
 
 // ── IMPORTANT: callback safety rules ────────────────────────
 // PubSubClient passes topic and payload as pointers INTO its internal buffer.
@@ -1692,7 +1741,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     else if (strcmp(fieldName, "gw")          == 0) { strlcpy(pendingGW,          val, sizeof(pendingGW));          pendingFields |= PF_GW;           }
     else if (strcmp(fieldName, "sn")          == 0) { strlcpy(pendingSN,          val, sizeof(pendingSN));          pendingFields |= PF_SN;           }
     else if (strcmp(fieldName, "dns")         == 0) { strlcpy(pendingDNS,         val, sizeof(pendingDNS));         pendingFields |= PF_DNS;          }
-    else if (strcmp(fieldName, "fwChannel")   == 0) { strlcpy(pendingFwChannel,   val, sizeof(pendingFwChannel));   pendingFields |= PF_FW_CHANNEL;   }
+    else if (strcmp(fieldName, "fwChannel")        == 0) { strlcpy(pendingFwChannel,      val, sizeof(pendingFwChannel));      pendingFields |= PF_FW_CHANNEL;       }
+    else if (strcmp(fieldName, "firstBootDelayMin") == 0) { strlcpy(pendingFirstBootDelay, val, sizeof(pendingFirstBootDelay)); pendingFields |= PF_FIRST_BOOT_DELAY; }
     // Unknown fields silently ignored
   }
 }
@@ -1730,7 +1780,7 @@ void connectMqtt() {
 
   if (!mqtt.connected()) {
     logf("MQTT      — could not connect, going to sleep\n");
-    goToSleep();
+    goToSleep(SLEEP_MINUTES);
   }
 }
 
@@ -1958,20 +2008,20 @@ void publishConfigState() {
   snprintf(snStr,  sizeof(snStr),  "%d.%d.%d.%d", cfg.sn[0],  cfg.sn[1],  cfg.sn[2],  cfg.sn[3]);
   snprintf(dnsStr, sizeof(dnsStr), "%d.%d.%d.%d", cfg.dns[0], cfg.dns[1], cfg.dns[2], cfg.dns[3]);
 
-  char payload[560];
+  char payload[600];
   snprintf(payload, sizeof(payload),
     "{\"mqttBroker\":\"%s\",\"mqttPort\":%d,"
     "\"mqttUser\":\"%s\",\"mqttPassword\":\"***\","
     "\"syslogHost\":\"%s\",\"syslogPort\":%d,"
     "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d,"
     "\"staticIP\":%s,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"dns\":\"%s\","
-    "\"fwChannel\":\"%s\"}",
+    "\"fwChannel\":\"%s\",\"firstBootDelayMin\":%d}",
     cfg.mqttBroker, cfg.mqttPort,
     cfg.mqttUser,
     cfg.syslogHost, cfg.syslogPort,
     cfg.moisturePin, cfg.batteryPin, cfg.reedPin,
     cfg.staticIP ? "true" : "false", ipStr, gwStr, snStr, dnsStr,
-    cfg.fwChannel);
+    cfg.fwChannel, cfg.firstBootDelayMin);
   mqtt.publish(CONFIG_STATE_TOPIC, payload, true);
   mqtt.loop();
   logf("Config    — state published to %s\n", CONFIG_STATE_TOPIC);
@@ -2003,7 +2053,8 @@ void applyConfigChange() {
     if (pendingFields & PF_GW)          { snprintf(t, sizeof(t), "%s/gw",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_SN)          { snprintf(t, sizeof(t), "%s/sn",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_DNS)         { snprintf(t, sizeof(t), "%s/dns",         CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_FW_CHANNEL)  { snprintf(t, sizeof(t), "%s/fwChannel",  CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_FW_CHANNEL)         { snprintf(t, sizeof(t), "%s/fwChannel",        CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_FIRST_BOOT_DELAY)   { snprintf(t, sizeof(t), "%s/firstBootDelayMin", CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
   }
 
   bool changed = false;
@@ -2099,6 +2150,12 @@ void applyConfigChange() {
     } else {
       logf("Config    — fwChannel rejected: must be 'stable' or 'beta'\n");
     }
+  }
+
+  if (pendingFields & PF_FIRST_BOOT_DELAY) {
+    int p = atoi(pendingFirstBootDelay);
+    if (p < 0 || p > 120) { logf("Config    — firstBootDelayMin rejected: must be 0-120\n"); }
+    else { cfg.firstBootDelayMin = p; logf("Config    — firstBootDelayMin -> %d\n", p); changed = true; }
   }
 
   if (changed) {
@@ -2249,6 +2306,17 @@ void publishConfigDiscovery() {
         device));
   }
 
+  // ── Number: First Boot Delay ─────────────────────────────
+  publishMqttEntity(DISC_CFG_FIRST_BOOT_DELAY, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"First Boot Delay\",\"unique_id\":\"%s_cfg_first_boot_delay\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.firstBootDelayMin }}\","
+      "\"command_topic\":\"%s/firstBootDelayMin\",\"retain\":true,"
+      "\"min\":0,\"max\":120,\"step\":1,\"mode\":\"box\","
+      "\"unit_of_measurement\":\"min\","
+      "\"icon\":\"mdi:timer\",%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+
   // ── Select: Update Channel ───────────────────────────────
   // Options: "stable" (default) or "beta". Retained so sleeping sensors
   // pick up the change on next wake; HA select reflects current state via
@@ -2333,11 +2401,22 @@ void setup() {
   logf("Config    — sensor%d, SSID: %s, broker: %s\n",
     cfg.unitNumber, cfg.wifiSSID, cfg.mqttBroker);
 
+  // ── First cold-boot delay ─────────────────────────────────
+  // On power-cycle (POWERON) or the post-portal SW restart (flagged by handleSave),
+  // skip moisture so an open-air near-zero reading isn't sent before the sensor
+  // is planted. Device sleeps firstBootDelayMin then wakes for the first full read.
+  bool portalJustConfigured = checkAndClearFirstBootPending();
+  bool isFirstBootDelay = ((resetReason == ESP_RST_POWERON || portalJustConfigured)
+                            && cfg.firstBootDelayMin > 0);
+
   // ── Read sensors before WiFi — radio noise affects ADC ───
   // Set ADC attenuation once here (after config load so we have the right pin).
   // Moved out of readMoisture() so it runs once per wake, not per call.
   analogSetPinAttenuation(cfg.moisturePin, ADC_11db);
-  MoistureReading moisture = readMoisture();
+  MoistureReading moisture = {};
+  if (!isFirstBootDelay) {
+    moisture = readMoisture();
+  }
 
   int   batRawMv = 0;
   float batV     = readBatteryVoltage(batRawMv);
@@ -2373,7 +2452,25 @@ void setup() {
   getTimestamp(timestamp, sizeof(timestamp));
 
   char payload[512];
-  if (batV > 0) {
+  if (isFirstBootDelay) {
+    logf("State     — first cold boot, moisture omitted (sleeping %d min)\n",
+         cfg.firstBootDelayMin);
+    if (batV > 0) {
+      snprintf(payload, sizeof(payload),
+        "{\"sensor\":\"%s\","
+        "\"battery_v\":%.2f,\"battery_pct\":%d,\"battery_raw_mv\":%d,"
+        "\"rssi\":%d,\"fw_version\":\"%s\",\"ts\":\"%s\"}",
+        SENSOR_ID, batV, batPct, batRawMv, WiFi.RSSI(),
+        FIRMWARE_VERSION, timestamp);
+    } else {
+      snprintf(payload, sizeof(payload),
+        "{\"sensor\":\"%s\","
+        "\"battery_v\":null,\"battery_pct\":null,\"battery_raw_mv\":%d,"
+        "\"rssi\":%d,\"fw_version\":\"%s\",\"ts\":\"%s\"}",
+        SENSOR_ID, batRawMv, WiFi.RSSI(),
+        FIRMWARE_VERSION, timestamp);
+    }
+  } else if (batV > 0) {
     snprintf(payload, sizeof(payload),
       "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
       "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":%.2f,"
@@ -2418,7 +2515,7 @@ void setup() {
   logf("Heap      — free: %u bytes (min: %u)\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
 
   mqtt.disconnect();
-  goToSleep();
+  goToSleep(isFirstBootDelay ? cfg.firstBootDelayMin : SLEEP_MINUTES);
 }
 
 void loop() {
