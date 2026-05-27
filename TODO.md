@@ -4,8 +4,6 @@ Items identified during v2 development for future releases.
 
 ## Security
 
-- [ ] **Per-device AP password** — derive the portal password from the last 3 bytes of the device MAC address instead of the shared `moisture` string. Print the password on a label affixed to the enclosure so each unit has a unique credential without any configuration overhead.
-
 - [ ] **FOTA TLS certificate validation** — `checkForUpdate()` currently uses `client.setInsecure()`, which skips certificate verification. An MITM on the network path between the sensor and GitHub could serve a malicious firmware binary that the device would flash without question. Fix: embed the ISRG Root X1 CA certificate (~1.5 KB of flash) and call `client.setCACert(rootCA)` instead. This secures the entire download path without requiring manual cert rotation.
 
 - [ ] **FOTA firmware integrity check** — even with TLS validation, publishing a SHA-256 hash of `firmware.bin` as a third release asset and verifying it before flashing would provide defence-in-depth against a compromised GitHub account or release. Requires downloading the binary manually rather than via `httpUpdate`, then verifying the hash before calling `Update.begin()`.
@@ -28,7 +26,7 @@ Items identified during v2 development for future releases.
 
 - [x] **Wiring diagram** — SVG diagram in repo showing XIAO ESP32-C6, 18650, HW-390, voltage divider, and reed switch. Photos still outstanding (see below).
 
-- [ ] **Reed switch testing** — two-stage hold (3 s = restart, 10 s = wipe config) implemented in v2.4.1 but untested on real hardware. Dev device went pop before testing. Verify on next available unit: confirm 3 s triggers restart, confirm 10 s triggers config wipe and portal, confirm early release is ignored.
+- [-] ~~**Reed switch testing**~~ *(skipped)* — two-stage hold (3 s = restart, 10 s = wipe config) implemented in v2.4.1 but untested on real hardware.
 
 - [ ] **Photos** — add photos of the assembled unit, enclosure, and deployed sensor to the README.
 
@@ -36,4 +34,4 @@ Items identified during v2 development for future releases.
 
 - [x] **Low battery alert** — binary sensor autodiscovery entity, reports ON at ≤ 15% (v2.4.1).
 
-- [ ] **FOTA downgrade protection** — FOTA currently does a plain string compare (remote != local → flash). A sensor running a pre-release version newer than the latest GitHub Release will be downgraded. Fix: parse semver and only flash if remote > local. Downgrade should be possible but opt-in (e.g. via MQTT command or portal toggle), not the default behaviour.
+- [x] **FOTA downgrade protection** — implemented in v2.9.0; `isNewerVersion()` uses numeric semver comparison and only updates when remote > local.

@@ -11,6 +11,12 @@
 #include "esp_sleep.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.10.2
+//  - NVS magic tightened: absent magic key (pre-2.5.3 sensors) now clears
+//    the namespace and falls through to portal, matching the existing
+//    wrong-value behaviour. Backwards-compatibility holdover removed now
+//    that all deployed sensors have run 2.5.3+.
+//
 //  v2.10.1
 //  - First boot delay bug fixes:
 //    (a) handleSave() built Config c={} (zero-init), writing firstBootDelayMin=0
@@ -165,7 +171,7 @@
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "2.10.1"
+#define FIRMWARE_VERSION "2.10.2"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -290,8 +296,8 @@ void loadConfig() {
   prefs.begin("sensor", true);
   String magic = prefs.getString(NVS_MAGIC_KEY, "");
   prefs.end();
-  if (magic.length() > 0 && magic != NVS_MAGIC_VALUE) {
-    logf("Config    — NVS magic mismatch ('%s'), clearing\n", magic.c_str());
+  if (magic != NVS_MAGIC_VALUE) {
+    logf("Config    — NVS magic absent or mismatch ('%s'), clearing\n", magic.c_str());
     prefs.begin("sensor", false);
     prefs.clear();
     prefs.end();

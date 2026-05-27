@@ -3,6 +3,28 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.10.2] — 2026-05-27
+
+### Changed
+- NVS magic check tightened: absent magic key now clears the namespace and falls through to portal, matching the behaviour for a wrong-value magic key. Previously, absent magic was left alone for backwards compatibility with pre-2.5.3 sensors. All deployed sensors have run 2.5.3+ for some time.
+
+## [2.10.1] — 2026-05-27
+
+### Fixed
+- `handleSave()` built `Config c = {}` (zero-initialised), saving `firstBootDelayMin = 0` to NVS and discarding the 15-minute default. Fixed: `handleSave()` now copies `firstBootDelayMin` from `cfg` before saving.
+- Post-portal `ESP.restart()` gives `reset_reason = SW (3)`, not `POWERON (1)`, so the first operational boot after configuring a new sensor never triggered the delay. Fixed with a one-shot NVS flag (`firstBootPend`) set by `handleSave()` and atomically read and cleared by `checkAndClearFirstBootPending()` at next boot.
+
+## [2.10.0] — 2026-05-27
+
+### Added
+- **First boot delay** — on power-cycle (`ESP_RST_POWERON`) or immediately after portal configuration, the device publishes all stats except moisture then sleeps for `firstBootDelayMin` (default 15 minutes) before waking for the first full reading. Prevents a spurious near-zero moisture reading while the sensor is still in open air after battery insertion.
+- `firstBootDelayMin` config field (NVS key `firstBootMin`, default 15, range 0–120 minutes). Set to 0 to disable.
+- HA `First Boot Delay` number entity (0–120 min) via autodiscovery.
+- MQTT remote config: `config/set/firstBootDelayMin` — same pattern as all other configurable fields.
+
+### Changed
+- `goToSleep()` now takes an explicit `int minutes` parameter (was hardcoded to `SLEEP_MINUTES`).
+
 ## [2.9.0] — 2026-05-16
 
 ### Changed
@@ -22,7 +44,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `*.bin` added to `.gitignore`
 - `CHANGELOG.md` and `build.sh`
 
-## [2.8.0] — 2026-04-XX
+## [2.8.0] — 2026-05-15
 
 ### Added
 - Beta FOTA channel — opt sensors into pre-releases via HA select entity
@@ -60,5 +82,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 - NVS magic key validation — detects stale config from foreign firmware and falls through to portal
 
+[2.10.2]: https://github.com/mcleancraig/moisture-sensor-esp32/releases/tag/v2.10.2
+[2.10.1]: https://github.com/mcleancraig/moisture-sensor-esp32/releases/tag/v2.10.1
+[2.10.0]: https://github.com/mcleancraig/moisture-sensor-esp32/releases/tag/v2.10.0
 [2.9.0]: https://github.com/mcleancraig/moisture-sensor-esp32/releases/tag/v2.9.0
 [2.8.0]: https://github.com/mcleancraig/moisture-sensor-esp32/releases/tag/v2.8.0
