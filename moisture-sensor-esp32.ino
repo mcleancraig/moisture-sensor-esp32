@@ -11,6 +11,16 @@
 #include "esp_sleep.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.10.1
+//  - First boot delay bug fixes:
+//    (a) handleSave() built Config c={} (zero-init), writing firstBootDelayMin=0
+//        to NVS and discarding the 15-min default. Fixed: handleSave() now
+//        copies firstBootDelayMin from the current cfg before saving.
+//    (b) After portal config, ESP.restart() produces reset_reason=SW (3), not
+//        ESP_RST_POWERON (1), so the post-portal boot never triggered the delay.
+//        Fixed: handleSave() sets a one-shot NVS flag (firstBootPend); setup()
+//        checks both ESP_RST_POWERON and that flag to determine isFirstBootDelay.
+//
 //  v2.10.0
 //  - First boot delay: on power-cycle cold boot the device publishes all
 //    stats except moisture, then sleeps for firstBootDelayMin (default 15)
@@ -155,7 +165,7 @@
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "2.10.0"
+#define FIRMWARE_VERSION "2.10.1"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -353,6 +363,17 @@ void clearConfig() {
   prefs.clear();
   prefs.end();
   logf("Config    — NVS cleared\n");
+}
+
+// Reads and atomically clears the one-shot "first boot pending" flag.
+// Set by handleSave() so the post-portal SW restart triggers the first-boot delay
+// even though its reset_reason is SW (3) rather than POWERON (1).
+static bool checkAndClearFirstBootPending() {
+  prefs.begin("sensor", false);
+  bool pending = prefs.getBool("firstBootPend", false);
+  if (pending) prefs.putBool("firstBootPend", false);
+  prefs.end();
+  return pending;
 }
 
 void saveConfig(const Config& c) {
@@ -1130,7 +1151,16 @@ void handleSave() {
   c.batteryPin  = server.arg("batteryPin").toInt();
   c.reedPin     = server.arg("reedPin").toInt();
 
+  // Preserve MQTT-only fields that have no portal form input.
+  c.firstBootDelayMin = cfg.firstBootDelayMin;
+
   saveConfig(c);
+
+  // One-shot flag: the post-portal ESP.restart() has reset_reason=SW, not POWERON.
+  // This flag tells setup() to treat that restart as a first-boot-delay boot.
+  prefs.begin("sensor", false);
+  prefs.putBool("firstBootPend", true);
+  prefs.end();
 
   server.send_P(200, "text/html", SAVED_HTML);
   delay(1500);
@@ -2372,10 +2402,12 @@ void setup() {
     cfg.unitNumber, cfg.wifiSSID, cfg.mqttBroker);
 
   // ── First cold-boot delay ─────────────────────────────────
-  // On power-cycle, skip moisture so an open-air near-zero reading isn't
-  // sent before the sensor is planted. Device sleeps firstBootDelayMin then
-  // wakes for the first full read.
-  bool isFirstBootDelay = (resetReason == ESP_RST_POWERON && cfg.firstBootDelayMin > 0);
+  // On power-cycle (POWERON) or the post-portal SW restart (flagged by handleSave),
+  // skip moisture so an open-air near-zero reading isn't sent before the sensor
+  // is planted. Device sleeps firstBootDelayMin then wakes for the first full read.
+  bool portalJustConfigured = checkAndClearFirstBootPending();
+  bool isFirstBootDelay = ((resetReason == ESP_RST_POWERON || portalJustConfigured)
+                            && cfg.firstBootDelayMin > 0);
 
   // ── Read sensors before WiFi — radio noise affects ADC ───
   // Set ADC attenuation once here (after config load so we have the right pin).
