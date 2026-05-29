@@ -11,6 +11,28 @@
 #include "esp_sleep.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v2.11.0
+//  - NVS magic: revert v2.10.2 tightening for the absent-magic case.
+//    Absent magic (pre-2.5.3 sensors that never called saveConfig()) now
+//    proceeds normally again and writes magic at the end of a successful
+//    loadConfig(). Wrong-value magic still clears NVS as before. This fixes
+//    the v2.10.2 regression that wiped sensors configured before 2.5.3 that
+//    had never triggered a config change since upgrading.
+//  - First boot delay: fix handleSave() copying firstBootDelayMin from an
+//    uninitialised cfg when loadConfig() returned early (magic wipe). Now
+//    uses 15-minute default when config was never loaded, preserving an
+//    explicit user setting when it was. This also fixes the linked issue
+//    where post-wipe portal provisioning silently disabled the delay.
+//  - Portal AP name: shortened from full 12-char MAC to last-3-bytes
+//    (MOISTURE-AABBCC) — unique per device, easier to distinguish when
+//    multiple sensors are in portal mode simultaneously.
+//  - Boot logging: reset_reason now includes human-readable string
+//    (POWERON, SW, PANIC, WDT, BROWNOUT, …). A new log line on cold
+//    boots/portal-restarts confirms whether first boot delay is active and
+//    the configured value — directly visible in syslog without inference.
+//  - Sleep log: added delay(50) in goToSleep() to give the final syslog
+//    UDP packet time to transmit before the radio shuts down.
+//
 //  v2.10.2
 //  - NVS magic tightened: absent magic key (pre-2.5.3 sensors) now clears
 //    the namespace and falls through to portal, matching the existing
@@ -171,7 +193,7 @@
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "2.10.2"
+#define FIRMWARE_VERSION "2.11.0"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -291,18 +313,22 @@ const char* NVS_MAGIC_VALUE = "moisture-1";
 
 void loadConfig() {
   // Check magic before reading anything else.
-  // Wrong → clear stale NVS and return (configLoaded stays false → portal).
-  // Missing → proceed normally for pre-2.5.3 sensors.
+  // Wrong value → a different firmware used our namespace; clear stale NVS and
+  //   return (configLoaded stays false → portal).
+  // Absent (empty) → pre-2.5.3 sensor that never called saveConfig() post-upgrade;
+  //   proceed normally and write magic at the end of a successful load so the
+  //   migration happens passively on the next boot.
   prefs.begin("sensor", true);
   String magic = prefs.getString(NVS_MAGIC_KEY, "");
   prefs.end();
-  if (magic != NVS_MAGIC_VALUE) {
-    logf("Config    — NVS magic absent or mismatch ('%s'), clearing\n", magic.c_str());
+  if (magic.length() > 0 && magic != NVS_MAGIC_VALUE) {
+    logf("Config    — NVS magic mismatch ('%s'), clearing\n", magic.c_str());
     prefs.begin("sensor", false);
     prefs.clear();
     prefs.end();
     return;
   }
+  // Absent magic is fine — we'll write it below after a successful load.
 
   prefs.begin("sensor", true);
   cfg.unitNumber = prefs.getInt("sensorNum", 0);
@@ -349,6 +375,15 @@ void loadConfig() {
   prefs.end();
 
   configLoaded = (cfg.unitNumber > 0 && strlen(cfg.wifiSSID) > 0 && strlen(cfg.mqttBroker) > 0);
+
+  // Passively migrate pre-2.5.3 sensors: write magic now so future boots pass
+  // the strict check even if saveConfig() is never called (no config changes).
+  if (configLoaded && magic.length() == 0) {
+    logf("Config    — NVS magic absent, writing (pre-2.5.3 migration)\n");
+    prefs.begin("sensor", false);
+    prefs.putString(NVS_MAGIC_KEY, NVS_MAGIC_VALUE);
+    prefs.end();
+  }
 }
 
 void validateConfig() {
@@ -1158,7 +1193,9 @@ void handleSave() {
   c.reedPin     = server.arg("reedPin").toInt();
 
   // Preserve MQTT-only fields that have no portal form input.
-  c.firstBootDelayMin = cfg.firstBootDelayMin;
+  // Use the default when config was never loaded (fresh provision or post-wipe)
+  // so that cfg being zero-initialised doesn't silently disable the delay.
+  c.firstBootDelayMin = configLoaded ? cfg.firstBootDelayMin : 15;
 
   saveConfig(c);
 
@@ -1187,8 +1224,10 @@ void startConfigPortal() {
   uint8_t mac[6];
   esp_efuse_mac_get_default(mac);
   char apName[32];
-  snprintf(apName, sizeof(apName), "MOISTURE_%02X%02X%02X%02X%02X%02X",
-    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  // Use last 3 MAC bytes — unique per device, short enough to distinguish
+  // at a glance when multiple sensors are in portal mode simultaneously.
+  snprintf(apName, sizeof(apName), "MOISTURE-%02X%02X%02X",
+    mac[3], mac[4], mac[5]);
 
   logf("Portal    — starting AP: %s\n", apName);
   logf("Portal    — password: %s\n", AP_PASSWORD);
@@ -1534,6 +1573,7 @@ void goToSleep(int minutes) {
   esp_deep_sleep_enable_gpio_wakeup(1ULL << cfg.reedPin, ESP_GPIO_WAKEUP_GPIO_LOW);
 
   Serial.flush();
+  delay(50);  // allow last syslog UDP packet to transmit before radio shuts down
   esp_sleep_enable_timer_wakeup((uint64_t)minutes * 60 * 1000000ULL);
   esp_deep_sleep_start();
 }
@@ -2360,7 +2400,17 @@ void setup() {
   // ── Wake / reset reason ───────────────────────────────────
   esp_reset_reason_t resetReason = esp_reset_reason();
   if (resetReason != ESP_RST_DEEPSLEEP) {
-    logf("Boot      — v%s reset_reason=%d\n", FIRMWARE_VERSION, (int)resetReason);
+    const char* rstName =
+      (resetReason == ESP_RST_POWERON)  ? "POWERON"  :
+      (resetReason == ESP_RST_EXT)      ? "EXT"      :
+      (resetReason == ESP_RST_SW)       ? "SW"       :
+      (resetReason == ESP_RST_PANIC)    ? "PANIC"    :
+      (resetReason == ESP_RST_INT_WDT)  ? "INT_WDT"  :
+      (resetReason == ESP_RST_TASK_WDT) ? "TASK_WDT" :
+      (resetReason == ESP_RST_WDT)      ? "WDT"      :
+      (resetReason == ESP_RST_BROWNOUT) ? "BROWNOUT"  : "UNKNOWN";
+    logf("Boot      — v%s reset_reason=%d (%s)\n",
+         FIRMWARE_VERSION, (int)resetReason, rstName);
   }
   switch (esp_sleep_get_wakeup_cause()) {
     case ESP_SLEEP_WAKEUP_TIMER:
@@ -2414,6 +2464,10 @@ void setup() {
   bool portalJustConfigured = checkAndClearFirstBootPending();
   bool isFirstBootDelay = ((resetReason == ESP_RST_POWERON || portalJustConfigured)
                             && cfg.firstBootDelayMin > 0);
+  if (resetReason == ESP_RST_POWERON || portalJustConfigured) {
+    logf("Boot      — firstBootDelay: %s (firstBootDelayMin=%d)\n",
+         isFirstBootDelay ? "active" : "disabled", cfg.firstBootDelayMin);
+  }
 
   // ── Read sensors before WiFi — radio noise affects ADC ───
   // Set ADC attenuation once here (after config load so we have the right pin).
