@@ -3,6 +3,17 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.11.0] — 2026-05-29
+
+### Fixed
+- **NVS magic regression (v2.10.2)**: absent magic (sensors configured before v2.5.3 that never triggered a config change post-upgrade) now proceeds normally again instead of wiping NVS. Magic is written passively at the end of a successful `loadConfig()` so the migration happens on the next boot without any portal interaction. Wrong-value magic still wipes NVS as before.
+- **First boot delay disabled after portal re-provision**: `handleSave()` was copying `firstBootDelayMin` from `cfg` even when `loadConfig()` had returned early (after a magic wipe), leaving `cfg` zero-initialised and silently saving `firstBootDelayMin = 0`. Now uses the 15-minute default when config was never loaded, preserving an explicit user value when it was.
+
+### Changed
+- **Portal AP name**: shortened from full 12-char MAC (`MOISTURE_AABBCCDDEEFF`) to last-3-bytes short form (`MOISTURE-DDEEFF`) — unique per device, much easier to distinguish when multiple sensors are in portal mode simultaneously.
+- **Boot logging**: `reset_reason` now includes human-readable string (`POWERON`, `SW`, `PANIC`, `WDT`, `BROWNOUT`, …). A new log line on cold boots and portal-restarts confirms whether the first boot delay is active and the configured value.
+- **Sleep log reliability**: `goToSleep()` now waits 50 ms after logging before calling `esp_deep_sleep_start()`, giving the final syslog UDP packet time to transmit before the radio shuts down.
+
 ## [2.10.2] — 2026-05-27
 
 ### Changed
