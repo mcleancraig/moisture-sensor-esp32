@@ -13,6 +13,7 @@ Two-person team — always use feature branches:
 - `main` is production only — never commit directly to it
 - Feature branches should be short-lived; merge as soon as the feature is complete
 - One PR per feature into the version branch
+- Riskier versions can be tagged as a beta (`vX.X.X-bNN`) straight off the version branch before step 5, and promoted to stable by dropping the suffix — see README.md "Beta releases" for the full procedure
 
 ## Git commands
 

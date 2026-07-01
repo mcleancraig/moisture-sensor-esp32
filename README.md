@@ -237,6 +237,28 @@ Then on GitHub go to **Releases → Draft a new release**, select the tag, and a
 
 ---
 
+## Beta releases
+
+Riskier changes can be shipped to a subset of sensors first via the **beta FOTA channel** (an HA select entity per sensor, `stable` / `beta`) before promoting to everyone.
+
+**To cut a beta:**
+
+1. On the version branch (not `main`), set `FIRMWARE_VERSION` to `X.X.X-bNN` (e.g. `2.11.0-b01`; bump `NN` for a respin — `2.11.0-b02`, etc.)
+2. Tag and push: `git tag -a v2.11.0-b01 -m "..." && git push origin v2.11.0-b01`
+3. On GitHub, draft a release from that tag and check **Set as a pre-release**, then attach `.bin` and `version.txt` as usual. Pre-releases are invisible to the stable channel (`/releases/latest` skips them) — the beta channel polls the releases API directly and picks them up.
+4. Sensors with their channel set to `beta` update to it; stable-channel sensors are unaffected.
+
+**To promote a confirmed beta to stable:**
+
+1. On the version branch, drop the `-bNN` suffix from `FIRMWARE_VERSION` (e.g. `2.11.0-b01` → `2.11.0`)
+2. Finalise the `CHANGELOG.md` entry
+3. Open the final PR from the version branch into `main` per the branching workflow, and merge
+4. Tag and release as normal (`vX.X.X`, *not* a pre-release) — this is what every sensor, not just the beta channel, updates to
+
+`isNewerVersion()` treats stable as always newer than a beta of the same version, and a higher `-bNN` as newer than a lower one, so promoting to stable is picked up by beta-channel sensors automatically, and switching a sensor's channel back and forth is handled without needing a version bump.
+
+---
+
 ## Moisture sensor calibration
 
 The HW-390 sensor must be calibrated once per unit for accurate percentage readings. The raw millivolt values are included in every MQTT payload (`moisture_raw_mv`) to assist with this.
