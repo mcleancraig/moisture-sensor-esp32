@@ -12,7 +12,7 @@ Items identified during v2 development for future releases.
 
 ## Maintainability
 
-- [ ] **NVS magic — tighten to clear-on-absent (post-fleet-update)** — v2.5.3 clears the `"sensor"` namespace only when the magic key is *wrong* (a different value); absent magic is left alone for backwards compatibility with pre-2.5.3 sensors. Once all deployed sensors have run 2.5.3+ (and therefore written the magic key on their next save), flip the logic to also clear on absent — making it consistent with the pump controller's stricter policy. Check sensor firmware versions in HA before doing this.
+- [x] **NVS magic — migrate pre-2.5.3 sensors (v2.11.0)** — v2.10.2's clear-on-absent tightening turned out to wipe sensors that had run pre-2.5.3 firmware and never since triggered a config save, so v2.11.0 reverted it: absent magic now proceeds normally and is written passively at the end of a successful `loadConfig()`, migrating those sensors on their next boot with no portal interaction. Wrong-value magic still clears NVS as before.
 
 - [x] **FOTA (v2.1.0)** — sensors automatically check GitHub Releases on each wake and self-update. Attach `version.txt` and `firmware.bin` to each release. IDE-based OTA removed.
 
