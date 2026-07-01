@@ -3,6 +3,19 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.0.0] — 2026-07-01
+
+### Removed
+- **Restart MQTT/HA control** — the Restart button and `garden/sensorN/cmd` `restart` command are gone. No longer applicable now the device already restarts every wake as part of its normal sleep cycle. `reset` (full config wipe + portal) is unaffected.
+- **Reed Switch Pin MQTT/HA control** — the "Reed Switch Pin" number entity and `config/set/reedPin` are gone. `reedPin` is now portal-only, matching `wifiSSID`/`unitNumber`. The reed switch itself (hold 3s to restart, hold 10s to wipe config, GPIO wakeup) is unchanged.
+- **Update-on-next-wake MQTT/HA control** — the "Update on next wake" button, `garden/sensorN/update` retained flag, and the force-check path in `checkForUpdate()` are gone. Routine FOTA already checks every wake (throttled to 24h), and beta-channel promotion doesn't depend on it.
+
+### Added
+- **Sleep Interval MQTT/HA control** — `config/set/sleepMinutes` and a "Sleep Interval" number entity (1-720 min) let you change how long the sensor sleeps between wake cycles without reflashing. Defaults to the previous hardcoded 120 minutes.
+
+### Upgrade notes
+- After every sensor is running v3.0.0+, run `cleanup-mqtt-retained.sh` against your broker to clear the retained Restart/Update button discovery configs, the Reed Switch Pin discovery config, and the `garden/sensorN/update` flag — none of these are republished or cleared automatically by the firmware change alone.
+
 ## [2.11.0] — 2026-07-01
 
 ### Fixed

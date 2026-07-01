@@ -11,6 +11,24 @@
 #include "esp_sleep.h"
 
 // ═══════════════════════════════════════════════════════════
+//  v3.0.0
+//  - Removed the Restart MQTT/HA control (button + garden/sensorN/cmd
+//    "restart" command). No longer applicable now the device already
+//    restarts every wake as part of the sleep cycle.
+//  - Removed the Reed Switch Pin MQTT/HA control (config/set/reedPin +
+//    HA number entity). The reed switch itself — hold-to-restart,
+//    hold-to-wipe, GPIO wakeup, portal field — is unchanged; reedPin is
+//    now portal-only, matching wifiSSID/unitNumber.
+//  - Removed the Update-on-next-wake MQTT/HA control (button +
+//    garden/sensorN/update retained flag + fotaForceArmed). Routine FOTA
+//    already checks every wake (throttled to 24h) and beta-channel
+//    promotion works without it.
+//  - Added Sleep Interval MQTT/HA control (config/set/sleepMinutes,
+//    "Sleep Interval" number entity, 1-720 min) — replaces the hardcoded
+//    SLEEP_MINUTES constant as the default.
+//  - See cleanup-mqtt-retained.sh to clear retained broker state left by
+//    the removed controls once the fleet is on v3.0.0+.
+//
 //  v2.11.0
 //  - NVS magic: revert v2.10.2 tightening for the absent-magic case.
 //    Absent magic (pre-2.5.3 sensors that never called saveConfig()) now
@@ -283,6 +301,8 @@ struct Config {
   char    fwChannel[8];  // selects stable (/releases/latest) or beta (/releases)
   // First cold-boot delay — minutes to sleep before sending first full reading
   int     firstBootDelayMin;  // default 15; 0 = disabled
+  // Minutes to sleep between wake cycles — default SLEEP_MINUTES
+  int     sleepMinutes;
 } cfg;
 
 struct MoistureReading {
@@ -371,6 +391,7 @@ void loadConfig() {
   if (strlen(cfg.fwChannel) == 0) strlcpy(cfg.fwChannel, "stable", sizeof(cfg.fwChannel));
 
   cfg.firstBootDelayMin = prefs.getInt("firstBootMin", 15);
+  cfg.sleepMinutes      = prefs.getInt("sleepMin", SLEEP_MINUTES);
 
   prefs.end();
 
@@ -439,6 +460,7 @@ void saveConfig(const Config& c) {
   prefs.putInt("reedPin",       c.reedPin);
   prefs.putString("fwChannel",  c.fwChannel);
   prefs.putInt("firstBootMin",  c.firstBootDelayMin);
+  prefs.putInt("sleepMin",      c.sleepMinutes);
   prefs.end();
   logf("Config    — saved to NVS\n");
 }
@@ -455,7 +477,6 @@ char DISC_MOISTURE[128];
 char DISC_BAT_V[128];
 char DISC_BAT_PCT[128];
 char DISC_TS[128];
-char DISC_BTN_RESTART[128];
 char DISC_BTN_RESET[128];
 char DISC_BAT_LOW[128];
 char DISC_FW[128];
@@ -470,17 +491,15 @@ char DISC_CFG_SYSLOG_HOST[128];
 char DISC_CFG_SYSLOG_PORT[128];
 char DISC_CFG_MOISTURE_PIN[128];
 char DISC_CFG_BATTERY_PIN[128];
-char DISC_CFG_REED_PIN[128];
 // Network config discovery topics
 char DISC_CFG_STATIC_IP[128];
 char DISC_CFG_IP[128];
 char DISC_CFG_GW[128];
 char DISC_CFG_SN[128];
 char DISC_CFG_DNS[128];
-char UPDATE_TOPIC[64];        // garden/sensorN/update — retained flag for force-FOTA
-char DISC_BTN_UPDATE[128];    // HA button: Update on next wake
 char DISC_CFG_FW_CHANNEL[128]; // HA select: stable / beta
 char DISC_CFG_FIRST_BOOT_DELAY[128]; // HA number: first boot delay minutes
+char DISC_CFG_SLEEP_MINUTES[128]; // HA number: sleep interval minutes
 
 void buildDerivedConfig() {
   snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.unitNumber);
@@ -495,8 +514,6 @@ void buildDerivedConfig() {
     "%s/sensor/%s_battery_pct/config",     HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_TS, sizeof(DISC_TS),
     "%s/sensor/%s_ts/config",              HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_BTN_RESTART, sizeof(DISC_BTN_RESTART),
-    "%s/button/%s_restart/config",         HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BTN_RESET, sizeof(DISC_BTN_RESET),
     "%s/button/%s_reset/config",             HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_BAT_LOW, sizeof(DISC_BAT_LOW),
@@ -523,8 +540,6 @@ void buildDerivedConfig() {
     "%s/number/%s_cfg_moisture_pin/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_BATTERY_PIN, sizeof(DISC_CFG_BATTERY_PIN),
     "%s/number/%s_cfg_battery_pin/config",  HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_REED_PIN, sizeof(DISC_CFG_REED_PIN),
-    "%s/number/%s_cfg_reed_pin/config",     HA_DISCOVERY_PREFIX, SENSOR_ID);
 
   snprintf(DISC_CFG_STATIC_IP, sizeof(DISC_CFG_STATIC_IP),
     "%s/switch/%s_cfg_static_ip/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
@@ -536,14 +551,12 @@ void buildDerivedConfig() {
     "%s/text/%s_cfg_sn/config",            HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_DNS,       sizeof(DISC_CFG_DNS),
     "%s/text/%s_cfg_dns/config",           HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(UPDATE_TOPIC,        sizeof(UPDATE_TOPIC),
-    "garden/%s/update",                    SENSOR_ID);
-  snprintf(DISC_BTN_UPDATE,     sizeof(DISC_BTN_UPDATE),
-    "%s/button/%s_update/config",          HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_FW_CHANNEL, sizeof(DISC_CFG_FW_CHANNEL),
     "%s/select/%s_cfg_fw_channel/config",  HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_FIRST_BOOT_DELAY, sizeof(DISC_CFG_FIRST_BOOT_DELAY),
     "%s/number/%s_cfg_first_boot_delay/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(DISC_CFG_SLEEP_MINUTES, sizeof(DISC_CFG_SLEEP_MINUTES),
+    "%s/number/%s_cfg_sleep_minutes/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1196,6 +1209,7 @@ void handleSave() {
   // Use the default when config was never loaded (fresh provision or post-wipe)
   // so that cfg being zero-initialised doesn't silently disable the delay.
   c.firstBootDelayMin = configLoaded ? cfg.firstBootDelayMin : 15;
+  c.sleepMinutes      = configLoaded ? cfg.sleepMinutes      : SLEEP_MINUTES;
 
   saveConfig(c);
 
@@ -1268,10 +1282,6 @@ void startConfigPortal() {
 //  FOTA
 // ═══════════════════════════════════════════════════════════
 
-// Set by mqttCallback when a retained message arrives on UPDATE_TOPIC.
-// Consumed (and cleared) at the top of checkForUpdate().
-static bool fotaForceArmed = false;
-
 // Compare version strings numerically. Returns true if remote > local.
 // Handles X.Y.Z and X.Y.Z-bNN (beta) suffixes:
 //   stable > beta of same version  (2.9.0 > 2.9.0-b02)
@@ -1298,20 +1308,18 @@ void checkForUpdate() {
   bool isBeta      = strcmp(cfg.fwChannel, "beta") == 0;
   bool isDev       = strchr(FIRMWARE_VERSION, '-') != NULL;  // any non-release build
   bool isDevBuild  = strstr(FIRMWARE_VERSION, "-dev.") != NULL;  // dev SHA builds only
-  bool isForced    = fotaForceArmed;
-  fotaForceArmed = false;   // consume flag regardless of outcome
 
-  // Stable channel: skip *dev* builds unless forced (beta builds like 2.8.0-b01
-  // must be allowed through so they can promote back to the latest stable).
-  if (!isBeta && isDevBuild && !isForced) {
+  // Stable channel: skip *dev* builds (beta builds like 2.8.0-b01 must be
+  // allowed through so they can promote back to the latest stable).
+  if (!isBeta && isDevBuild) {
     logf("FOTA      — skipped: dev build on stable channel (%s)\n", FIRMWARE_VERSION);
     return;
   }
 
-  // 24h gate — bypass when forced.
+  // 24h gate.
   // lastFotaCheck resets on hard reset/OTA restart so a check always happens
-  // on first wake after a firmware change even without forcing.
-  if (!isForced && hasValidEpoch() && lastFotaCheck > 0
+  // on first wake after a firmware change.
+  if (hasValidEpoch() && lastFotaCheck > 0
       && (time(nullptr) - lastFotaCheck) < 86400) {
     logf("FOTA      — skipped (checked %ldh ago)\n",
          (long)(time(nullptr) - lastFotaCheck) / 3600);
@@ -1322,7 +1330,6 @@ void checkForUpdate() {
   // off 24h rather than retrying every wake.
   if (hasValidEpoch()) lastFotaCheck = time(nullptr);
 
-  if (isForced) logf("FOTA      — forced check\n");
   logf("FOTA      — checking for update (%s channel)...\n",
        isBeta ? "beta" : "stable");
 
@@ -1690,7 +1697,6 @@ static char pendingSyslogHost[64]    = "";
 static char pendingSyslogPort[8]     = "";
 static char pendingMoisturePin[4]    = "";
 static char pendingBatteryPin[4]     = "";
-static char pendingReedPin[4]        = "";
 static char pendingStaticIP[8]       = "";  // "true" or "false"
 static char pendingIP[16]            = "";
 static char pendingGW[16]            = "";
@@ -1698,7 +1704,8 @@ static char pendingSN[16]            = "";
 static char pendingDNS[16]           = "";
 static char pendingFwChannel[8]      = "";
 static char pendingFirstBootDelay[8] = "";
-static uint16_t pendingFields        = 0;   // bitmask — which fields arrived this cycle
+static char pendingSleepMinutes[8]   = "";
+static uint32_t pendingFields        = 0;   // bitmask — which fields arrived this cycle
 #define PF_MQTT_BROKER    (1<<0)
 #define PF_MQTT_PORT      (1<<1)
 #define PF_MQTT_USER      (1<<2)
@@ -1707,7 +1714,6 @@ static uint16_t pendingFields        = 0;   // bitmask — which fields arrived 
 #define PF_SYSLOG_PORT    (1<<5)
 #define PF_MOISTURE_PIN   (1<<6)
 #define PF_BATTERY_PIN    (1<<7)
-#define PF_REED_PIN       (1<<8)
 #define PF_STATIC_IP      (1<<9)
 #define PF_IP             (1<<10)
 #define PF_GW             (1<<11)
@@ -1715,6 +1721,7 @@ static uint16_t pendingFields        = 0;   // bitmask — which fields arrived 
 #define PF_DNS            (1<<13)
 #define PF_FW_CHANNEL          (1<<14)
 #define PF_FIRST_BOOT_DELAY    (1<<15)
+#define PF_SLEEP_MINUTES       (1<<16)
 
 // ── IMPORTANT: callback safety rules ────────────────────────
 // PubSubClient passes topic and payload as pointers INTO its internal buffer.
@@ -1732,19 +1739,10 @@ static uint16_t pendingFields        = 0;   // bitmask — which fields arrived 
 // All validation, cfg mutation, and logging happens in applyConfigChange()
 // outside the callback, after the listen loop completes.
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  // ── Force-FOTA flag ───────────────────────────────────────
-  // UPDATE_TOPIC carries a retained "1" when the HA button is pressed.
-  // Set the in-memory flag here; the retained message is cleared outside
-  // the callback (see post-listen block in setup()) to obey callback safety rules.
-  if (strcmp(topic, UPDATE_TOPIC) == 0) {
-    if (length > 0) fotaForceArmed = true;
-    return;
-  }
-
   if (length == 0) return;
 
   if (strcmp(topic, CMD_TOPIC) == 0) {
-    // ── Command (restart / reset) ──────────────────────────
+    // ── Command (reset) ─────────────────────────────────────
     if (length >= sizeof(cmdPayload)) return;
     memcpy(cmdPayload, payload, length);
     cmdPayload[length] = '\0';
@@ -1781,7 +1779,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     else if (strcmp(fieldName, "syslogPort")   == 0) { strlcpy(pendingSyslogPort,   val, sizeof(pendingSyslogPort));   pendingFields |= PF_SYSLOG_PORT;   }
     else if (strcmp(fieldName, "moisturePin")  == 0) { strlcpy(pendingMoisturePin,  val, sizeof(pendingMoisturePin));  pendingFields |= PF_MOISTURE_PIN;  }
     else if (strcmp(fieldName, "batteryPin")   == 0) { strlcpy(pendingBatteryPin,   val, sizeof(pendingBatteryPin));   pendingFields |= PF_BATTERY_PIN;   }
-    else if (strcmp(fieldName, "reedPin")      == 0) { strlcpy(pendingReedPin,      val, sizeof(pendingReedPin));      pendingFields |= PF_REED_PIN;      }
     else if (strcmp(fieldName, "staticIP")    == 0) { strlcpy(pendingStaticIP,    val, sizeof(pendingStaticIP));    pendingFields |= PF_STATIC_IP;    }
     else if (strcmp(fieldName, "ip")          == 0) { strlcpy(pendingIP,          val, sizeof(pendingIP));          pendingFields |= PF_IP;           }
     else if (strcmp(fieldName, "gw")          == 0) { strlcpy(pendingGW,          val, sizeof(pendingGW));          pendingFields |= PF_GW;           }
@@ -1789,6 +1786,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     else if (strcmp(fieldName, "dns")         == 0) { strlcpy(pendingDNS,         val, sizeof(pendingDNS));         pendingFields |= PF_DNS;          }
     else if (strcmp(fieldName, "fwChannel")        == 0) { strlcpy(pendingFwChannel,      val, sizeof(pendingFwChannel));      pendingFields |= PF_FW_CHANNEL;       }
     else if (strcmp(fieldName, "firstBootDelayMin") == 0) { strlcpy(pendingFirstBootDelay, val, sizeof(pendingFirstBootDelay)); pendingFields |= PF_FIRST_BOOT_DELAY; }
+    else if (strcmp(fieldName, "sleepMinutes")      == 0) { strlcpy(pendingSleepMinutes,   val, sizeof(pendingSleepMinutes));   pendingFields |= PF_SLEEP_MINUTES;    }
     // Unknown fields silently ignored
   }
 }
@@ -1814,9 +1812,8 @@ void connectMqtt() {
       snprintf(configWildcard, sizeof(configWildcard), "%s/+", CONFIG_SET_PREFIX);
       mqtt.subscribe(CMD_TOPIC);
       mqtt.subscribe(configWildcard);
-      mqtt.subscribe(UPDATE_TOPIC);
-      logf("MQTT      — subscribed to %s, %s and %s\n",
-           CMD_TOPIC, configWildcard, UPDATE_TOPIC);
+      logf("MQTT      — subscribed to %s and %s\n",
+           CMD_TOPIC, configWildcard);
     } else {
       logf("MQTT      — failed (rc=%d), retrying\n", mqtt.state());
       delay(500);
@@ -1826,7 +1823,7 @@ void connectMqtt() {
 
   if (!mqtt.connected()) {
     logf("MQTT      — could not connect, going to sleep\n");
-    goToSleep(SLEEP_MINUTES);
+    goToSleep(cfg.sleepMinutes);
   }
 }
 
@@ -1838,8 +1835,8 @@ void processMqttCommand() {
   // Clear the retained CMD message from the broker now that we have a local copy.
   // Safe to publish here — we are outside mqttCallback so the PubSubClient buffer
   // is not in use by the callback.  Must happen before acting on the command so
-  // a reset/restart doesn't leave a stale retained "reset"/"restart" on the broker
-  // that would fire again on the next boot.
+  // a reset doesn't leave a stale retained "reset" on the broker that would
+  // fire again on the next boot.
   mqtt.publish(CMD_TOPIC, "", true);
   mqtt.loop();
 
@@ -1848,12 +1845,6 @@ void processMqttCommand() {
     Serial.flush();
     delay(200);
     clearConfig();
-    ESP.restart();
-
-  } else if (strcmp(cmdPayload, "restart") == 0) {
-    logf("Command   — restarting\n");
-    Serial.flush();
-    delay(200);
     ESP.restart();
 
   } else {
@@ -1989,17 +1980,6 @@ void publishDiscovery() {
       "\"icon\":\"mdi:wifi\",%s}",
       SENSOR_ID, STATE_TOPIC, device));
 
-  // ── Button: Restart ──────────────────────────────────────
-  // Publishes a retained "restart" to CMD_TOPIC when pressed in HA.
-  // The sensor picks this up on its next wake, restarts, then clears it.
-  publishMqttEntity(DISC_BTN_RESTART, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Restart\",\"unique_id\":\"%s_restart\","
-      "\"command_topic\":\"%s\",\"payload_press\":\"restart\","
-      "\"retain\":true,\"device_class\":\"restart\","
-      "\"icon\":\"mdi:restart\",%s}",
-      SENSOR_ID, CMD_TOPIC, device));
-
   // ── Button: Reset Config ─────────────────────────────────
   // Publishes a retained "reset" to CMD_TOPIC when pressed in HA.
   // The sensor clears NVS and opens the captive portal on next wake.
@@ -2010,18 +1990,6 @@ void publishDiscovery() {
       "\"retain\":true,"
       "\"icon\":\"mdi:restore\",%s}",
       SENSOR_ID, CMD_TOPIC, device));
-
-  // ── Button: Update on next wake ───────────────────────────
-  // Publishes a retained "1" to UPDATE_TOPIC when pressed.
-  // The sensor receives it on next wake, arms a forced FOTA check, and
-  // clears the retained message before running checkForUpdate().
-  publishMqttEntity(DISC_BTN_UPDATE, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Update on next wake\",\"unique_id\":\"%s_update\","
-      "\"command_topic\":\"%s\",\"payload_press\":\"1\","
-      "\"retain\":true,"
-      "\"icon\":\"mdi:cloud-download\",%s}",
-      SENSOR_ID, UPDATE_TOPIC, device));
 
   logf("Discovery — complete (sensors + buttons)\n");
 }
@@ -2061,13 +2029,13 @@ void publishConfigState() {
     "\"syslogHost\":\"%s\",\"syslogPort\":%d,"
     "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d,"
     "\"staticIP\":%s,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"dns\":\"%s\","
-    "\"fwChannel\":\"%s\",\"firstBootDelayMin\":%d}",
+    "\"fwChannel\":\"%s\",\"firstBootDelayMin\":%d,\"sleepMinutes\":%d}",
     cfg.mqttBroker, cfg.mqttPort,
     cfg.mqttUser,
     cfg.syslogHost, cfg.syslogPort,
     cfg.moisturePin, cfg.batteryPin, cfg.reedPin,
     cfg.staticIP ? "true" : "false", ipStr, gwStr, snStr, dnsStr,
-    cfg.fwChannel, cfg.firstBootDelayMin);
+    cfg.fwChannel, cfg.firstBootDelayMin, cfg.sleepMinutes);
   mqtt.publish(CONFIG_STATE_TOPIC, payload, true);
   mqtt.loop();
   logf("Config    — state published to %s\n", CONFIG_STATE_TOPIC);
@@ -2093,7 +2061,6 @@ void applyConfigChange() {
     if (pendingFields & PF_SYSLOG_PORT)   { snprintf(t, sizeof(t), "%s/syslogPort",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_MOISTURE_PIN)  { snprintf(t, sizeof(t), "%s/moisturePin",  CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_BATTERY_PIN)   { snprintf(t, sizeof(t), "%s/batteryPin",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_REED_PIN)      { snprintf(t, sizeof(t), "%s/reedPin",      CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_STATIC_IP)   { snprintf(t, sizeof(t), "%s/staticIP",    CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_IP)          { snprintf(t, sizeof(t), "%s/ip",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_GW)          { snprintf(t, sizeof(t), "%s/gw",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
@@ -2101,6 +2068,7 @@ void applyConfigChange() {
     if (pendingFields & PF_DNS)         { snprintf(t, sizeof(t), "%s/dns",         CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_FW_CHANNEL)         { snprintf(t, sizeof(t), "%s/fwChannel",        CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
     if (pendingFields & PF_FIRST_BOOT_DELAY)   { snprintf(t, sizeof(t), "%s/firstBootDelayMin", CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    if (pendingFields & PF_SLEEP_MINUTES)       { snprintf(t, sizeof(t), "%s/sleepMinutes",      CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
   }
 
   bool changed = false;
@@ -2159,13 +2127,6 @@ void applyConfigChange() {
     else { cfg.batteryPin = p; logf("Config    — batteryPin -> %d\n", p); changed = true; }
   }
 
-  if (pendingFields & PF_REED_PIN) {
-    int p = atoi(pendingReedPin);
-    if (p < 0 || p > 10) { logf("Config    — reedPin rejected: must be 0-10\n"); }
-    else if (p == cfg.moisturePin || p == cfg.batteryPin) { logf("Config    — reedPin rejected: conflicts with another pin\n"); }
-    else { cfg.reedPin = p; logf("Config    — reedPin -> %d\n", p); changed = true; }
-  }
-
   if (pendingFields & PF_STATIC_IP) {
     if (strcmp(pendingStaticIP, "true") == 0)       { cfg.staticIP = true;  logf("Config    — staticIP -> true\n");  changed = true; }
     else if (strcmp(pendingStaticIP, "false") == 0) { cfg.staticIP = false; logf("Config    — staticIP -> false\n"); changed = true; }
@@ -2202,6 +2163,12 @@ void applyConfigChange() {
     int p = atoi(pendingFirstBootDelay);
     if (p < 0 || p > 120) { logf("Config    — firstBootDelayMin rejected: must be 0-120\n"); }
     else { cfg.firstBootDelayMin = p; logf("Config    — firstBootDelayMin -> %d\n", p); changed = true; }
+  }
+
+  if (pendingFields & PF_SLEEP_MINUTES) {
+    int p = atoi(pendingSleepMinutes);
+    if (p < 1 || p > 720) { logf("Config    — sleepMinutes rejected: must be 1-720\n"); }
+    else { cfg.sleepMinutes = p; logf("Config    — sleepMinutes -> %d\n", p); changed = true; }
   }
 
   if (changed) {
@@ -2310,16 +2277,6 @@ void publishConfigDiscovery() {
       "\"icon\":\"mdi:battery\",%s}",
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
-  // ── Number: Reed Switch Pin ──────────────────────────────
-  publishMqttEntity(DISC_CFG_REED_PIN, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Reed Switch Pin\",\"unique_id\":\"%s_cfg_reed_pin\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.reedPin }}\","
-      "\"command_topic\":\"%s/reedPin\",\"retain\":true,"
-      "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
-      "\"icon\":\"mdi:magnet\",%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
-
   // ── Switch: Static IP ────────────────────────────────────
   // payload_on/off are the raw values sent to the per-field subtopic
   publishMqttEntity(DISC_CFG_STATIC_IP, payload, sizeof(payload),
@@ -2361,6 +2318,17 @@ void publishConfigDiscovery() {
       "\"min\":0,\"max\":120,\"step\":1,\"mode\":\"box\","
       "\"unit_of_measurement\":\"min\","
       "\"icon\":\"mdi:timer\",%s}",
+      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+
+  // ── Number: Sleep Interval ────────────────────────────────
+  publishMqttEntity(DISC_CFG_SLEEP_MINUTES, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Sleep Interval\",\"unique_id\":\"%s_cfg_sleep_minutes\","
+      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.sleepMinutes }}\","
+      "\"command_topic\":\"%s/sleepMinutes\",\"retain\":true,"
+      "\"min\":1,\"max\":720,\"step\":1,\"mode\":\"box\","
+      "\"unit_of_measurement\":\"min\","
+      "\"icon\":\"mdi:sleep\",%s}",
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Select: Update Channel ───────────────────────────────
@@ -2563,19 +2531,12 @@ void setup() {
   processMqttCommand();
   applyConfigChange();
 
-  // ── Clear retained force-update flag, then note it for FOTA below ──
-  if (fotaForceArmed) {
-    mqtt.publish(UPDATE_TOPIC, "", true);  // clear retained flag
-    mqtt.loop();
-    logf("FOTA      — force-update armed, checking now\n");
-  }
-
-  // ── FOTA check (after MQTT so force-update command takes effect this wake) ──
+  // ── FOTA check ──────────────────────────────────────────
   checkForUpdate();
   logf("Heap      — free: %u bytes (min: %u)\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
 
   mqtt.disconnect();
-  goToSleep(isFirstBootDelay ? cfg.firstBootDelayMin : SLEEP_MINUTES);
+  goToSleep(isFirstBootDelay ? cfg.firstBootDelayMin : cfg.sleepMinutes);
 }
 
 void loop() {
