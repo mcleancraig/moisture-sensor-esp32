@@ -3,7 +3,7 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [2.11.0] — 2026-05-29
+## [2.11.0] — 2026-07-01
 
 ### Fixed
 - **NVS magic regression (v2.10.2)**: absent magic (sensors configured before v2.5.3 that never triggered a config change post-upgrade) now proceeds normally again instead of wiping NVS. Magic is written passively at the end of a successful `loadConfig()` so the migration happens on the next boot without any portal interaction. Wrong-value magic still wipes NVS as before.
@@ -93,6 +93,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 ### Added
 - NVS magic key validation — detects stale config from foreign firmware and falls through to portal
 
+[2.11.0]: https://github.com/mcleancraig/moisture-sensor-esp32/releases/tag/v2.11.0
 [2.10.2]: https://github.com/mcleancraig/moisture-sensor-esp32/releases/tag/v2.10.2
 [2.10.1]: https://github.com/mcleancraig/moisture-sensor-esp32/releases/tag/v2.10.1
 [2.10.0]: https://github.com/mcleancraig/moisture-sensor-esp32/releases/tag/v2.10.0
