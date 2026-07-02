@@ -19,15 +19,17 @@
 //    HA number entity). The reed switch itself — hold-to-restart,
 //    hold-to-wipe, GPIO wakeup, portal field — is unchanged; reedPin is
 //    now portal-only, matching wifiSSID/unitNumber.
-//  - Removed the Update-on-next-wake MQTT/HA control (button +
-//    garden/sensorN/update retained flag + fotaForceArmed). Routine FOTA
-//    already checks every wake (throttled to 24h) and beta-channel
-//    promotion works without it.
+//  - Update-on-next-wake button renamed "Force check on next wake" for
+//    clarity (b01 removed it, reasoning routine FOTA already checks every
+//    wake — but that check is throttled to once per 24h, and this button
+//    is the only way to bypass the throttle on demand, e.g. right after
+//    cutting a beta for a test device. Restored in b02.)
 //  - Added Sleep Interval MQTT/HA control (config/set/sleepMinutes,
 //    "Sleep Interval" number entity, 1-720 min) — replaces the hardcoded
 //    SLEEP_MINUTES constant as the default.
 //  - See cleanup-mqtt-retained.sh to clear retained broker state left by
-//    the removed controls once the fleet is on v3.0.0+.
+//    the Restart button and Reed Switch Pin control once the fleet is on
+//    v3.0.0+.
 //
 //  v2.11.0
 //  - NVS magic: revert v2.10.2 tightening for the absent-magic case.
@@ -211,7 +213,7 @@
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "3.0.0-b01"
+#define FIRMWARE_VERSION "3.0.0-b02"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -497,6 +499,8 @@ char DISC_CFG_IP[128];
 char DISC_CFG_GW[128];
 char DISC_CFG_SN[128];
 char DISC_CFG_DNS[128];
+char UPDATE_TOPIC[64];        // garden/sensorN/update — retained flag for force-FOTA
+char DISC_BTN_UPDATE[128];    // HA button: Force check on next wake
 char DISC_CFG_FW_CHANNEL[128]; // HA select: stable / beta
 char DISC_CFG_FIRST_BOOT_DELAY[128]; // HA number: first boot delay minutes
 char DISC_CFG_SLEEP_MINUTES[128]; // HA number: sleep interval minutes
@@ -551,6 +555,10 @@ void buildDerivedConfig() {
     "%s/text/%s_cfg_sn/config",            HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_DNS,       sizeof(DISC_CFG_DNS),
     "%s/text/%s_cfg_dns/config",           HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(UPDATE_TOPIC,        sizeof(UPDATE_TOPIC),
+    "garden/%s/update",                    SENSOR_ID);
+  snprintf(DISC_BTN_UPDATE,     sizeof(DISC_BTN_UPDATE),
+    "%s/button/%s_update/config",          HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_FW_CHANNEL, sizeof(DISC_CFG_FW_CHANNEL),
     "%s/select/%s_cfg_fw_channel/config",  HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(DISC_CFG_FIRST_BOOT_DELAY, sizeof(DISC_CFG_FIRST_BOOT_DELAY),
@@ -1282,6 +1290,10 @@ void startConfigPortal() {
 //  FOTA
 // ═══════════════════════════════════════════════════════════
 
+// Set by mqttCallback when a retained message arrives on UPDATE_TOPIC.
+// Consumed (and cleared) at the top of checkForUpdate().
+static bool fotaForceArmed = false;
+
 // Compare version strings numerically. Returns true if remote > local.
 // Handles X.Y.Z and X.Y.Z-bNN (beta) suffixes:
 //   stable > beta of same version  (2.9.0 > 2.9.0-b02)
@@ -1308,18 +1320,20 @@ void checkForUpdate() {
   bool isBeta      = strcmp(cfg.fwChannel, "beta") == 0;
   bool isDev       = strchr(FIRMWARE_VERSION, '-') != NULL;  // any non-release build
   bool isDevBuild  = strstr(FIRMWARE_VERSION, "-dev.") != NULL;  // dev SHA builds only
+  bool isForced    = fotaForceArmed;
+  fotaForceArmed = false;   // consume flag regardless of outcome
 
-  // Stable channel: skip *dev* builds (beta builds like 2.8.0-b01 must be
-  // allowed through so they can promote back to the latest stable).
-  if (!isBeta && isDevBuild) {
+  // Stable channel: skip *dev* builds unless forced (beta builds like 2.8.0-b01
+  // must be allowed through so they can promote back to the latest stable).
+  if (!isBeta && isDevBuild && !isForced) {
     logf("FOTA      — skipped: dev build on stable channel (%s)\n", FIRMWARE_VERSION);
     return;
   }
 
-  // 24h gate.
+  // 24h gate — bypass when forced.
   // lastFotaCheck resets on hard reset/OTA restart so a check always happens
-  // on first wake after a firmware change.
-  if (hasValidEpoch() && lastFotaCheck > 0
+  // on first wake after a firmware change even without forcing.
+  if (!isForced && hasValidEpoch() && lastFotaCheck > 0
       && (time(nullptr) - lastFotaCheck) < 86400) {
     logf("FOTA      — skipped (checked %ldh ago)\n",
          (long)(time(nullptr) - lastFotaCheck) / 3600);
@@ -1330,6 +1344,7 @@ void checkForUpdate() {
   // off 24h rather than retrying every wake.
   if (hasValidEpoch()) lastFotaCheck = time(nullptr);
 
+  if (isForced) logf("FOTA      — forced check\n");
   logf("FOTA      — checking for update (%s channel)...\n",
        isBeta ? "beta" : "stable");
 
@@ -1739,6 +1754,15 @@ static uint32_t pendingFields        = 0;   // bitmask — which fields arrived 
 // All validation, cfg mutation, and logging happens in applyConfigChange()
 // outside the callback, after the listen loop completes.
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // ── Force-FOTA flag ───────────────────────────────────────
+  // UPDATE_TOPIC carries a retained "1" when the HA button is pressed.
+  // Set the in-memory flag here; the retained message is cleared outside
+  // the callback (see post-listen block in setup()) to obey callback safety rules.
+  if (strcmp(topic, UPDATE_TOPIC) == 0) {
+    if (length > 0) fotaForceArmed = true;
+    return;
+  }
+
   if (length == 0) return;
 
   if (strcmp(topic, CMD_TOPIC) == 0) {
@@ -1812,8 +1836,9 @@ void connectMqtt() {
       snprintf(configWildcard, sizeof(configWildcard), "%s/+", CONFIG_SET_PREFIX);
       mqtt.subscribe(CMD_TOPIC);
       mqtt.subscribe(configWildcard);
-      logf("MQTT      — subscribed to %s and %s\n",
-           CMD_TOPIC, configWildcard);
+      mqtt.subscribe(UPDATE_TOPIC);
+      logf("MQTT      — subscribed to %s, %s and %s\n",
+           CMD_TOPIC, configWildcard, UPDATE_TOPIC);
     } else {
       logf("MQTT      — failed (rc=%d), retrying\n", mqtt.state());
       delay(500);
@@ -1990,6 +2015,19 @@ void publishDiscovery() {
       "\"retain\":true,"
       "\"icon\":\"mdi:restore\",%s}",
       SENSOR_ID, CMD_TOPIC, device));
+
+  // ── Button: Force check on next wake ──────────────────────
+  // Publishes a retained "1" to UPDATE_TOPIC when pressed.
+  // The sensor receives it on next wake, arms a forced FOTA check (bypassing
+  // the 24h throttle and, on the stable channel, the dev-build skip), and
+  // clears the retained message before running checkForUpdate().
+  publishMqttEntity(DISC_BTN_UPDATE, payload, sizeof(payload),
+    snprintf(payload, sizeof(payload),
+      "{\"name\":\"Force check on next wake\",\"unique_id\":\"%s_update\","
+      "\"command_topic\":\"%s\",\"payload_press\":\"1\","
+      "\"retain\":true,"
+      "\"icon\":\"mdi:cloud-download\",%s}",
+      SENSOR_ID, UPDATE_TOPIC, device));
 
   logf("Discovery — complete (sensors + buttons)\n");
 }
@@ -2531,7 +2569,14 @@ void setup() {
   processMqttCommand();
   applyConfigChange();
 
-  // ── FOTA check ──────────────────────────────────────────
+  // ── Clear retained force-update flag, then note it for FOTA below ──
+  if (fotaForceArmed) {
+    mqtt.publish(UPDATE_TOPIC, "", true);  // clear retained flag
+    mqtt.loop();
+    logf("FOTA      — force-update armed, checking now\n");
+  }
+
+  // ── FOTA check (after MQTT so force-update command takes effect this wake) ──
   checkForUpdate();
   logf("Heap      — free: %u bytes (min: %u)\n", ESP.getFreeHeap(), ESP.getMinFreeHeap());
 
