@@ -48,8 +48,8 @@ public:
 //    "Sleep Interval" number entity, 1-720 min) — replaces the hardcoded
 //    SLEEP_MINUTES constant as the default.
 //  - See cleanup-mqtt-retained.sh to clear retained broker state left by
-//    the Restart button and Reed Switch Pin control once the fleet is on
-//    v3.0.0+.
+//    the Restart button, Reed Switch Pin control, and remote config command
+//    topics once the fleet is on v3.0.1+.
 //
 //  v2.11.0
 //  - NVS magic: revert v2.10.2 tightening for the absent-magic case.
