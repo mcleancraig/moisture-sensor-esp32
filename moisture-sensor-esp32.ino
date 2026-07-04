@@ -9,6 +9,17 @@
 #include <time.h>
 #include "esp_mac.h"
 #include "esp_sleep.h"
+#include <esp_crt_bundle.h>
+#include <driver/gpio.h>
+
+class SecureClient : public WiFiClientSecure {
+public:
+  void enableDefaultBundle() {
+    attach_ssl_certificate_bundle(sslclient.get(), true);
+    _use_ca_bundle = true;
+    _use_insecure = false;
+  }
+};
 
 // ═══════════════════════════════════════════════════════════
 //  v3.0.0
@@ -213,7 +224,7 @@
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "3.0.0-b02"
+#define FIRMWARE_VERSION "3.0.0-b03"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -321,6 +332,13 @@ bool configLoaded = false;
 RTC_DATA_ATTR static time_t lastNtpSync   = 0;     // epoch of last successful NTP sync
 RTC_DATA_ATTR static time_t lastFotaCheck = 0;     // epoch of last FOTA version check
 RTC_DATA_ATTR static bool   discoveryDone = false; // true once discovery published this session
+
+struct WifiCache {
+  uint8_t bssid[6];
+  uint8_t channel;
+  bool    valid;
+};
+RTC_DATA_ATTR static WifiCache wifiCache = { .valid = false };
 
 // Forward use of _logf() — Arduino IDE generates the prototype; macro must be
 // defined before any call site (loadConfig, clearConfig, saveConfig) so it
@@ -1348,8 +1366,8 @@ void checkForUpdate() {
   logf("FOTA      — checking for update (%s channel)...\n",
        isBeta ? "beta" : "stable");
 
-  WiFiClientSecure client;
-  client.setInsecure();
+  SecureClient client;
+  client.enableDefaultBundle();
   client.setTimeout(FOTA_VERSION_TIMEOUT_MS / 1000);
   client.setHandshakeTimeout(FOTA_VERSION_TIMEOUT_MS / 1000);
 
@@ -1543,6 +1561,7 @@ void getTimestamp(char* buf, size_t len) {
 // ═══════════════════════════════════════════════════════════
 
 void checkReedSwitch() {
+  gpio_hold_dis((gpio_num_t)cfg.reedPin);
   pinMode(cfg.reedPin, INPUT_PULLUP);
   delay(50);
 
@@ -1592,6 +1611,14 @@ void goToSleep(int minutes) {
   // INPUT_PULLUP keeps the pin HIGH (reed open); closing to GND fires the wake.
   // The pullup state is retained during deep sleep so no spurious wakeups occur.
   pinMode(cfg.reedPin, INPUT_PULLUP);
+  
+  // Enable GPIO hold so that the pullup remains active even during deep sleep when
+  // peripheral power is lost.
+  gpio_hold_en((gpio_num_t)cfg.reedPin);
+#if !SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP
+  gpio_deep_sleep_hold_en();
+#endif
+
   esp_deep_sleep_enable_gpio_wakeup(1ULL << cfg.reedPin, ESP_GPIO_WAKEUP_GPIO_LOW);
 
   Serial.flush();
@@ -1670,23 +1697,59 @@ bool connectWifi() {
   }
 
   logf("WiFi      — connecting to %s\n", cfg.wifiSSID);
-  WiFi.begin(cfg.wifiSSID,
-    strlen(cfg.wifiPassword) > 0 ? cfg.wifiPassword : nullptr);
+  
+  bool triedCache = false;
+  if (wifiCache.valid) {
+    triedCache = true;
+    logf("WiFi      — fast connect using cached channel %d\n", wifiCache.channel);
+    WiFi.begin(cfg.wifiSSID,
+      strlen(cfg.wifiPassword) > 0 ? cfg.wifiPassword : nullptr,
+      wifiCache.channel,
+      wifiCache.bssid);
+  } else {
+    WiFi.begin(cfg.wifiSSID,
+      strlen(cfg.wifiPassword) > 0 ? cfg.wifiPassword : nullptr);
+  }
 
   unsigned long wifiStart = millis();
+  unsigned long timeout = triedCache ? 4000 : WIFI_TIMEOUT_MS; // 4s timeout for fast connect
+  
   while (WiFi.status() != WL_CONNECTED &&
-         millis() - wifiStart < (unsigned long)WIFI_TIMEOUT_MS) {
-    delay(500);
+         millis() - wifiStart < timeout) {
+    delay(200);
     Serial.print(".");
   }
   Serial.println();
 
+  // If fast connect failed, clear cache and retry normal connect immediately
+  if (WiFi.status() != WL_CONNECTED && triedCache) {
+    logf("WiFi      — fast connect failed, retrying full scan connect\n");
+    wifiCache.valid = false;
+    WiFi.disconnect();
+    delay(100);
+    WiFi.begin(cfg.wifiSSID,
+      strlen(cfg.wifiPassword) > 0 ? cfg.wifiPassword : nullptr);
+      
+    wifiStart = millis();
+    while (WiFi.status() != WL_CONNECTED &&
+           millis() - wifiStart < (unsigned long)WIFI_TIMEOUT_MS) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println();
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     logf("WiFi      — connected, IP: %s\n", WiFi.localIP().toString().c_str());
+    // Cache the successful connection details
+    memcpy(wifiCache.bssid, WiFi.BSSID(), 6);
+    wifiCache.channel = WiFi.channel();
+    wifiCache.valid   = true;
     return true;
   }
 
   logf("WiFi      — failed\n");
+  wifiCache.valid = false;
   return false;
 }
 

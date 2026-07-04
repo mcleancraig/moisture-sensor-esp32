@@ -3,6 +3,15 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.0.0-b03] — 2026-07-04
+
+### Added
+- **Wi-Fi Fast Connect Caching (Optimization 2)** — Implemented caching of successful Wi-Fi channel and BSSID in RTC SRAM. Speeds up subsequent connection attempts to ~200ms under optimal conditions, falling back to a full scan if fast connect fails within 4 seconds.
+- **Deep Sleep GPIO Pull-up Hold (Optimization 4)** — Maintains the Reed switch internal pull-up during deep sleep to prevent spurious wakeups, using conditional compilation to support the ESP32-C6's single-pin hold mechanism.
+
+### Changed
+- **Secure FOTA Certificate Bundle (Optimization 3)** — Replaced `client.setInsecure()` with secure validation using ESP32's built-in root CA certificate bundle (`esp_crt_bundle_attach` via a `SecureClient` wrapper) to properly and safely validate HTTPS connections and redirects.
+
 ## [3.0.0] — 2026-07-01
 
 ### Removed
