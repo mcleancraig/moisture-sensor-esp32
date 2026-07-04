@@ -3,6 +3,14 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.0.0-b04] — 2026-07-04
+
+### Changed
+- **Home Assistant Discovery Topic Refactoring** — Removed 25 redundant global `char[128]` buffer arrays, saving **3,200 bytes of permanent dynamic RAM (BSS)**. Discovery topics are now formatted dynamically on-the-fly.
+- **Shared Device JSON Helper** — Extracted duplicate Home Assistant `device` JSON construction logic into a static `getDeviceJSON()` helper function, saving **914 bytes of program Flash memory**.
+- **Consolidated Telemetry JSON Construction** — Replaced three duplicate, verbose `snprintf()` blocks in `setup()` with a clean conditional single-pass composer, reducing Flash footprint.
+- **Log Buffer & Stack Optimization** — Removed the redundant `char sysline[120]` stack buffer from `_logf()`, reducing active stack overhead by **120 bytes** for all print operations.
+
 ## [3.0.0-b03] — 2026-07-04
 
 ### Added

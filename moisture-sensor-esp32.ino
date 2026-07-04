@@ -224,7 +224,7 @@ public:
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "3.0.0-b03"
+#define FIRMWARE_VERSION "3.0.0-b04"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -493,96 +493,18 @@ char SENSOR_ID[16];
 char SENSOR_NAME[32];
 char STATE_TOPIC[64];
 char CMD_TOPIC[64];
-char DISC_MOISTURE[128];
-char DISC_BAT_V[128];
-char DISC_BAT_PCT[128];
-char DISC_TS[128];
-char DISC_BTN_RESET[128];
-char DISC_BAT_LOW[128];
-char DISC_FW[128];
-char DISC_RSSI[128];
 char CONFIG_SET_PREFIX[80];   // garden/sensorN/config/set  (subscribe as .../+)
 char CONFIG_STATE_TOPIC[80];  // garden/sensorN/config/state
-char DISC_CFG_MQTT_BROKER[128];
-char DISC_CFG_MQTT_PORT[128];
-char DISC_CFG_MQTT_USER[128];
-char DISC_CFG_MQTT_PASS[128];
-char DISC_CFG_SYSLOG_HOST[128];
-char DISC_CFG_SYSLOG_PORT[128];
-char DISC_CFG_MOISTURE_PIN[128];
-char DISC_CFG_BATTERY_PIN[128];
-// Network config discovery topics
-char DISC_CFG_STATIC_IP[128];
-char DISC_CFG_IP[128];
-char DISC_CFG_GW[128];
-char DISC_CFG_SN[128];
-char DISC_CFG_DNS[128];
 char UPDATE_TOPIC[64];        // garden/sensorN/update — retained flag for force-FOTA
-char DISC_BTN_UPDATE[128];    // HA button: Force check on next wake
-char DISC_CFG_FW_CHANNEL[128]; // HA select: stable / beta
-char DISC_CFG_FIRST_BOOT_DELAY[128]; // HA number: first boot delay minutes
-char DISC_CFG_SLEEP_MINUTES[128]; // HA number: sleep interval minutes
 
 void buildDerivedConfig() {
   snprintf(SENSOR_ID,   sizeof(SENSOR_ID),   "sensor%d",                  cfg.unitNumber);
   snprintf(SENSOR_NAME, sizeof(SENSOR_NAME), "Garden Moisture Sensor %d", cfg.unitNumber);
   snprintf(STATE_TOPIC, sizeof(STATE_TOPIC), "garden/%s/state",           SENSOR_ID);
   snprintf(CMD_TOPIC,   sizeof(CMD_TOPIC),   "garden/%s/cmd",             SENSOR_ID);
-  snprintf(DISC_MOISTURE, sizeof(DISC_MOISTURE),
-    "%s/sensor/%s_moisture/config",        HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_BAT_V, sizeof(DISC_BAT_V),
-    "%s/sensor/%s_battery_v/config",       HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_BAT_PCT, sizeof(DISC_BAT_PCT),
-    "%s/sensor/%s_battery_pct/config",     HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_TS, sizeof(DISC_TS),
-    "%s/sensor/%s_ts/config",              HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_BTN_RESET, sizeof(DISC_BTN_RESET),
-    "%s/button/%s_reset/config",             HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_BAT_LOW, sizeof(DISC_BAT_LOW),
-    "%s/binary_sensor/%s_battery_low/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_FW, sizeof(DISC_FW),
-    "%s/sensor/%s_fw/config",                 HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_RSSI, sizeof(DISC_RSSI),
-    "%s/sensor/%s_rssi/config",               HA_DISCOVERY_PREFIX, SENSOR_ID);
   snprintf(CONFIG_SET_PREFIX,  sizeof(CONFIG_SET_PREFIX),  "garden/%s/config/set",    SENSOR_ID);
   snprintf(CONFIG_STATE_TOPIC, sizeof(CONFIG_STATE_TOPIC), "garden/%s/config/state",  SENSOR_ID);
-  snprintf(DISC_CFG_MQTT_BROKER, sizeof(DISC_CFG_MQTT_BROKER),
-    "%s/text/%s_cfg_mqtt_broker/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_MQTT_PORT, sizeof(DISC_CFG_MQTT_PORT),
-    "%s/number/%s_cfg_mqtt_port/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_MQTT_USER, sizeof(DISC_CFG_MQTT_USER),
-    "%s/text/%s_cfg_mqtt_user/config",     HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_MQTT_PASS, sizeof(DISC_CFG_MQTT_PASS),
-    "%s/text/%s_cfg_mqtt_pass/config",     HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_SYSLOG_HOST, sizeof(DISC_CFG_SYSLOG_HOST),
-    "%s/text/%s_cfg_syslog_host/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_SYSLOG_PORT, sizeof(DISC_CFG_SYSLOG_PORT),
-    "%s/number/%s_cfg_syslog_port/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_MOISTURE_PIN, sizeof(DISC_CFG_MOISTURE_PIN),
-    "%s/number/%s_cfg_moisture_pin/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_BATTERY_PIN, sizeof(DISC_CFG_BATTERY_PIN),
-    "%s/number/%s_cfg_battery_pin/config",  HA_DISCOVERY_PREFIX, SENSOR_ID);
-
-  snprintf(DISC_CFG_STATIC_IP, sizeof(DISC_CFG_STATIC_IP),
-    "%s/switch/%s_cfg_static_ip/config",   HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_IP,        sizeof(DISC_CFG_IP),
-    "%s/text/%s_cfg_ip/config",            HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_GW,        sizeof(DISC_CFG_GW),
-    "%s/text/%s_cfg_gw/config",            HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_SN,        sizeof(DISC_CFG_SN),
-    "%s/text/%s_cfg_sn/config",            HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_DNS,       sizeof(DISC_CFG_DNS),
-    "%s/text/%s_cfg_dns/config",           HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(UPDATE_TOPIC,        sizeof(UPDATE_TOPIC),
-    "garden/%s/update",                    SENSOR_ID);
-  snprintf(DISC_BTN_UPDATE,     sizeof(DISC_BTN_UPDATE),
-    "%s/button/%s_update/config",          HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_FW_CHANNEL, sizeof(DISC_CFG_FW_CHANNEL),
-    "%s/select/%s_cfg_fw_channel/config",  HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_FIRST_BOOT_DELAY, sizeof(DISC_CFG_FIRST_BOOT_DELAY),
-    "%s/number/%s_cfg_first_boot_delay/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  snprintf(DISC_CFG_SLEEP_MINUTES, sizeof(DISC_CFG_SLEEP_MINUTES),
-    "%s/number/%s_cfg_sleep_minutes/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  snprintf(UPDATE_TOPIC,        sizeof(UPDATE_TOPIC),      "garden/%s/update",        SENSOR_ID);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -683,14 +605,11 @@ void _logf(const char* func, const char* fmt, ...) {
   if (strlen(cfg.syslogHost) == 0) return;
   if (syslogReady && (uint32_t)syslogIP == 0) return;
 
-  char sysline[SYSLOG_LINE];
-  strlcpy(sysline, line, sizeof(sysline));
-
   if (syslogReady) {
-    syslogSend(func, sysline);
+    syslogSend(func, line);
   } else {
-    strlcpy(syslogBuf[syslogHead].msg,  sysline, SYSLOG_LINE);
-    strlcpy(syslogBuf[syslogHead].func, func,    SYSLOG_FUNC);
+    strlcpy(syslogBuf[syslogHead].msg,  line, SYSLOG_LINE);
+    strlcpy(syslogBuf[syslogHead].func, func, SYSLOG_FUNC);
     syslogHead = (syslogHead + 1) % SYSLOG_LINES;
     syslogTotal++;
   }
@@ -1992,9 +1911,8 @@ static void publishMqttEntity(const char* topic, const char* payload,
   delay(50);
 }
 
-void publishDiscovery() {
-  char device[256];
-  snprintf(device, sizeof(device),
+static void getDeviceJSON(char* buf, size_t len) {
+  snprintf(buf, len,
     "\"device\":{"
       "\"identifiers\":[\"%s\"],"
       "\"name\":\"%s\","
@@ -2003,10 +1921,18 @@ void publishDiscovery() {
       "\"sw_version\":\"%s\""
     "}",
     SENSOR_ID, SENSOR_NAME, FIRMWARE_VERSION);
+}
+
+void publishDiscovery() {
+  char device[256];
+  getDeviceJSON(device, sizeof(device));
 
   char payload[640];
+  char topic[128];
 
-  publishMqttEntity(DISC_MOISTURE, payload, sizeof(payload),
+  // ── Moisture ─────────────────────────────────────────────
+  snprintf(topic, sizeof(topic), "%s/sensor/%s_moisture/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Moisture\",\"unique_id\":\"%s_moisture\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.moisture }}\","
@@ -2014,7 +1940,9 @@ void publishDiscovery() {
       "\"state_class\":\"measurement\",\"icon\":\"mdi:water-percent\",%s}",
       SENSOR_ID, STATE_TOPIC, device));
 
-  publishMqttEntity(DISC_BAT_V, payload, sizeof(payload),
+  // ── Battery Voltage ──────────────────────────────────────
+  snprintf(topic, sizeof(topic), "%s/sensor/%s_battery_v/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Battery Voltage\",\"unique_id\":\"%s_battery_v\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.battery_v }}\","
@@ -2022,7 +1950,9 @@ void publishDiscovery() {
       "\"state_class\":\"measurement\",\"icon\":\"mdi:battery\",%s}",
       SENSOR_ID, STATE_TOPIC, device));
 
-  publishMqttEntity(DISC_BAT_PCT, payload, sizeof(payload),
+  // ── Battery ──────────────────────────────────────────────
+  snprintf(topic, sizeof(topic), "%s/sensor/%s_battery_pct/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Battery\",\"unique_id\":\"%s_battery_pct\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.battery_pct }}\","
@@ -2035,7 +1965,8 @@ void publishDiscovery() {
   // Reads battery_pct from the JSON and reports ON (low) when <= LOW_BATTERY_PCT.
   // battery_pct is null when a suspicious reading is discarded; treated as
   // not-low in that case so a bad ADC reading doesn't spam alerts.
-  publishMqttEntity(DISC_BAT_LOW, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/binary_sensor/%s_battery_low/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Battery Low\",\"unique_id\":\"%s_battery_low\","
       "\"state_topic\":\"%s\","
@@ -2044,7 +1975,9 @@ void publishDiscovery() {
       "\"icon\":\"mdi:battery-alert\",%s}",
       SENSOR_ID, STATE_TOPIC, LOW_BATTERY_PCT, device));
 
-  publishMqttEntity(DISC_TS, payload, sizeof(payload),
+  // ── Last Seen ────────────────────────────────────────────
+  snprintf(topic, sizeof(topic), "%s/sensor/%s_ts/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Last Seen\",\"unique_id\":\"%s_ts\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.ts }}\","
@@ -2052,14 +1985,18 @@ void publishDiscovery() {
       "\"icon\":\"mdi:clock-outline\",%s}",
       SENSOR_ID, STATE_TOPIC, device));
 
-  publishMqttEntity(DISC_FW, payload, sizeof(payload),
+  // ── Firmware Version ─────────────────────────────────────
+  snprintf(topic, sizeof(topic), "%s/sensor/%s_fw/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Firmware Version\",\"unique_id\":\"%s_fw\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.fw_version }}\","
       "\"icon\":\"mdi:chip\",%s}",
       SENSOR_ID, STATE_TOPIC, device));
 
-  publishMqttEntity(DISC_RSSI, payload, sizeof(payload),
+  // ── RSSI ─────────────────────────────────────────────────
+  snprintf(topic, sizeof(topic), "%s/sensor/%s_rssi/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"RSSI\",\"unique_id\":\"%s_rssi\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.rssi }}\","
@@ -2071,7 +2008,8 @@ void publishDiscovery() {
   // ── Button: Reset Config ─────────────────────────────────
   // Publishes a retained "reset" to CMD_TOPIC when pressed in HA.
   // The sensor clears NVS and opens the captive portal on next wake.
-  publishMqttEntity(DISC_BTN_RESET, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/button/%s_reset/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Reset Config\",\"unique_id\":\"%s_reset\","
       "\"command_topic\":\"%s\",\"payload_press\":\"reset\","
@@ -2084,7 +2022,8 @@ void publishDiscovery() {
   // The sensor receives it on next wake, arms a forced FOTA check (bypassing
   // the 24h throttle and, on the stable channel, the dev-build skip), and
   // clears the retained message before running checkForUpdate().
-  publishMqttEntity(DISC_BTN_UPDATE, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/button/%s_update/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Force check on next wake\",\"unique_id\":\"%s_update\","
       "\"command_topic\":\"%s\",\"payload_press\":\"1\","
@@ -2288,17 +2227,10 @@ void applyConfigChange() {
 // settings as text and number entities in the device card.
 void publishConfigDiscovery() {
   char device[256];
-  snprintf(device, sizeof(device),
-    "\"device\":{"
-      "\"identifiers\":[\"%s\"],"
-      "\"name\":\"%s\","
-      "\"model\":\"ESP32-C6 Soil Sensor\","
-      "\"manufacturer\":\"DIY\","
-      "\"sw_version\":\"%s\""
-    "}",
-    SENSOR_ID, SENSOR_NAME, FIRMWARE_VERSION);
+  getDeviceJSON(device, sizeof(device));
 
   char payload[640];
+  char topic[128];
 
   // Each entity gets its own command_topic (config/set/<field>) so multiple
   // simultaneous changes each get their own retained slot on the broker and
@@ -2307,7 +2239,8 @@ void publishConfigDiscovery() {
   // No command_template needed — HA sends the raw field value directly.
 
   // ── Text: MQTT Broker ────────────────────────────────────
-  publishMqttEntity(DISC_CFG_MQTT_BROKER, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/text/%s_cfg_mqtt_broker/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"MQTT Broker\",\"unique_id\":\"%s_cfg_mqtt_broker\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttBroker }}\","
@@ -2315,7 +2248,8 @@ void publishConfigDiscovery() {
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Number: MQTT Port ────────────────────────────────────
-  publishMqttEntity(DISC_CFG_MQTT_PORT, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_mqtt_port/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"MQTT Port\",\"unique_id\":\"%s_cfg_mqtt_port\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPort }}\","
@@ -2324,7 +2258,8 @@ void publishConfigDiscovery() {
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Text: MQTT Username ──────────────────────────────────
-  publishMqttEntity(DISC_CFG_MQTT_USER, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/text/%s_cfg_mqtt_user/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"MQTT Username\",\"unique_id\":\"%s_cfg_mqtt_user\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttUser }}\","
@@ -2334,7 +2269,8 @@ void publishConfigDiscovery() {
   // ── Text: MQTT Password ──────────────────────────────────
   // Note: state_topic publishes "***" for the password — this entity is
   // write-only from HA's perspective; the current value is never displayed.
-  publishMqttEntity(DISC_CFG_MQTT_PASS, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/text/%s_cfg_mqtt_pass/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"MQTT Password\",\"unique_id\":\"%s_cfg_mqtt_pass\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPassword }}\","
@@ -2342,7 +2278,8 @@ void publishConfigDiscovery() {
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Text: Syslog Host ────────────────────────────────────
-  publishMqttEntity(DISC_CFG_SYSLOG_HOST, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/text/%s_cfg_syslog_host/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Syslog Host\",\"unique_id\":\"%s_cfg_syslog_host\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogHost }}\","
@@ -2350,7 +2287,8 @@ void publishConfigDiscovery() {
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Number: Syslog Port ──────────────────────────────────
-  publishMqttEntity(DISC_CFG_SYSLOG_PORT, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_syslog_port/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Syslog Port\",\"unique_id\":\"%s_cfg_syslog_port\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogPort }}\","
@@ -2359,7 +2297,8 @@ void publishConfigDiscovery() {
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Number: Moisture Pin ─────────────────────────────────
-  publishMqttEntity(DISC_CFG_MOISTURE_PIN, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_moisture_pin/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Moisture Pin\",\"unique_id\":\"%s_cfg_moisture_pin\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.moisturePin }}\","
@@ -2369,7 +2308,8 @@ void publishConfigDiscovery() {
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Number: Battery Pin ──────────────────────────────────
-  publishMqttEntity(DISC_CFG_BATTERY_PIN, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_battery_pin/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Battery Pin\",\"unique_id\":\"%s_cfg_battery_pin\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.batteryPin }}\","
@@ -2380,7 +2320,8 @@ void publishConfigDiscovery() {
 
   // ── Switch: Static IP ────────────────────────────────────
   // payload_on/off are the raw values sent to the per-field subtopic
-  publishMqttEntity(DISC_CFG_STATIC_IP, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/switch/%s_cfg_static_ip/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Static IP\",\"unique_id\":\"%s_cfg_static_ip\","
       "\"state_topic\":\"%s\","
@@ -2391,14 +2332,15 @@ void publishConfigDiscovery() {
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Text: IP, Gateway, Subnet Mask, DNS ──────────────────
-  const struct { const char* name; const char* uid; const char* key; const char* disc; } netFields[] = {
-    { "IP Address",  "cfg_ip",  "ip",  DISC_CFG_IP  },
-    { "Gateway",     "cfg_gw",  "gw",  DISC_CFG_GW  },
-    { "Subnet Mask", "cfg_sn",  "sn",  DISC_CFG_SN  },
-    { "DNS Server",  "cfg_dns", "dns", DISC_CFG_DNS },
+  const struct { const char* name; const char* uid; const char* key; } netFields[] = {
+    { "IP Address",  "cfg_ip",  "ip"  },
+    { "Gateway",     "cfg_gw",  "gw"  },
+    { "Subnet Mask", "cfg_sn",  "sn"  },
+    { "DNS Server",  "cfg_dns", "dns" },
   };
   for (auto& f : netFields) {
-    publishMqttEntity(f.disc, payload, sizeof(payload),
+    snprintf(topic, sizeof(topic), "%s/text/%s_%s/config", HA_DISCOVERY_PREFIX, SENSOR_ID, f.uid);
+    publishMqttEntity(topic, payload, sizeof(payload),
       snprintf(payload, sizeof(payload),
         "{\"name\":\"%s\",\"unique_id\":\"%s_%s\","
         "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.%s }}\","
@@ -2411,7 +2353,8 @@ void publishConfigDiscovery() {
   }
 
   // ── Number: First Boot Delay ─────────────────────────────
-  publishMqttEntity(DISC_CFG_FIRST_BOOT_DELAY, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_first_boot_delay/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"First Boot Delay\",\"unique_id\":\"%s_cfg_first_boot_delay\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.firstBootDelayMin }}\","
@@ -2422,7 +2365,8 @@ void publishConfigDiscovery() {
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
   // ── Number: Sleep Interval ────────────────────────────────
-  publishMqttEntity(DISC_CFG_SLEEP_MINUTES, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_sleep_minutes/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Sleep Interval\",\"unique_id\":\"%s_cfg_sleep_minutes\","
       "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.sleepMinutes }}\","
@@ -2436,7 +2380,8 @@ void publishConfigDiscovery() {
   // Options: "stable" (default) or "beta". Retained so sleeping sensors
   // pick up the change on next wake; HA select reflects current state via
   // config/state topic.
-  publishMqttEntity(DISC_CFG_FW_CHANNEL, payload, sizeof(payload),
+  snprintf(topic, sizeof(topic), "%s/select/%s_cfg_fw_channel/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
+  publishMqttEntity(topic, payload, sizeof(payload),
     snprintf(payload, sizeof(payload),
       "{\"name\":\"Update Channel\",\"unique_id\":\"%s_cfg_fw_channel\","
       "\"state_topic\":\"%s\","
@@ -2580,44 +2525,29 @@ void setup() {
   char timestamp[32];
   getTimestamp(timestamp, sizeof(timestamp));
 
-  char payload[512];
-  if (isFirstBootDelay) {
+  char moisturePart[96] = "";
+  if (!isFirstBootDelay) {
+    snprintf(moisturePart, sizeof(moisturePart),
+             "\"moisture\":%d,\"moisture_raw_mv\":%d,\"dry_mv\":%d,\"wet_mv\":%d,",
+             moisture.percent, moisture.rawMv, DRY_MV, WET_MV);
+  } else {
     logf("State     — first cold boot, moisture omitted (sleeping %d min)\n",
          cfg.firstBootDelayMin);
-    if (batV > 0) {
-      snprintf(payload, sizeof(payload),
-        "{\"sensor\":\"%s\","
-        "\"battery_v\":%.2f,\"battery_pct\":%d,\"battery_raw_mv\":%d,"
-        "\"rssi\":%d,\"fw_version\":\"%s\",\"ts\":\"%s\"}",
-        SENSOR_ID, batV, batPct, batRawMv, WiFi.RSSI(),
-        FIRMWARE_VERSION, timestamp);
-    } else {
-      snprintf(payload, sizeof(payload),
-        "{\"sensor\":\"%s\","
-        "\"battery_v\":null,\"battery_pct\":null,\"battery_raw_mv\":%d,"
-        "\"rssi\":%d,\"fw_version\":\"%s\",\"ts\":\"%s\"}",
-        SENSOR_ID, batRawMv, WiFi.RSSI(),
-        FIRMWARE_VERSION, timestamp);
-    }
-  } else if (batV > 0) {
-    snprintf(payload, sizeof(payload),
-      "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
-      "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":%.2f,"
-      "\"battery_pct\":%d,\"battery_raw_mv\":%d,\"rssi\":%d,"
-      "\"fw_version\":\"%s\",\"ts\":\"%s\"}",
-      SENSOR_ID, moisture.percent, moisture.rawMv,
-      DRY_MV, WET_MV, batV, batPct, batRawMv, WiFi.RSSI(),
-      FIRMWARE_VERSION, timestamp);
-  } else {
-    snprintf(payload, sizeof(payload),
-      "{\"sensor\":\"%s\",\"moisture\":%d,\"moisture_raw_mv\":%d,"
-      "\"dry_mv\":%d,\"wet_mv\":%d,\"battery_v\":null,"
-      "\"battery_pct\":null,\"battery_raw_mv\":%d,\"rssi\":%d,"
-      "\"fw_version\":\"%s\",\"ts\":\"%s\"}",
-      SENSOR_ID, moisture.percent, moisture.rawMv,
-      DRY_MV, WET_MV, batRawMv, WiFi.RSSI(),
-      FIRMWARE_VERSION, timestamp);
   }
+
+  char batteryPart[128] = "";
+  if (batV > 0) {
+    snprintf(batteryPart, sizeof(batteryPart),
+             "\"battery_v\":%.2f,\"battery_pct\":%d,", batV, batPct);
+  } else {
+    snprintf(batteryPart, sizeof(batteryPart),
+             "\"battery_v\":null,\"battery_pct\":null,");
+  }
+
+  char payload[512];
+  snprintf(payload, sizeof(payload),
+    "{\"sensor\":\"%s\",%s%s\"battery_raw_mv\":%d,\"rssi\":%d,\"fw_version\":\"%s\",\"ts\":\"%s\"}",
+    SENSOR_ID, moisturePart, batteryPart, batRawMv, WiFi.RSSI(), FIRMWARE_VERSION, timestamp);
   bool ok = mqtt.publish(STATE_TOPIC, payload, true);
   logf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
 
