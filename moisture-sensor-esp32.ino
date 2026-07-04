@@ -22,6 +22,15 @@ public:
 };
 
 // ═══════════════════════════════════════════════════════════
+//  v3.0.1
+//  - Completely removed the unused Reed Switch code, including
+//    the portal input fields, JavaScript/server-side validation,
+//    dynamic MQTT configuration parsing, and the checkReedSwitch()
+//    loop.
+//  - Physical pin D2 (GPIO 2) is now fully unassigned and can
+//    be safely used for sensor power gating (configured as Sensor
+//    Power Pin = 2) without boot loop risks or conflict checks.
+// ═══════════════════════════════════════════════════════════
 //  v3.0.0
 //  - Removed the Restart MQTT/HA control (button + garden/sensorN/cmd
 //    "restart" command). No longer applicable now the device already
@@ -224,13 +233,12 @@ public:
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "3.0.1-b01"
+#define FIRMWARE_VERSION "3.0.1-b02"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
 const int BATTERY_PIN  = 1;   // A1 — voltage divider midpoint
 const int BTN_BOOT     = 9;   // Boot button on XIAO ESP32-C6
-const int REED_PIN     = 2;   // Reed switch — GND when magnet present
 
 // ── Fixed calibration ─────────────────────────────────────
 const int   DRY_MV         = 2800;
@@ -244,8 +252,6 @@ const int SLEEP_MINUTES      = 120;
 const int AP_TIMEOUT_MIN     = 10;
 const int AP_SLEEP_MIN       = 10;
 const int BOOT_HOLD_MS       = 3000;
-const int REED_RESTART_MS    = 3000;   // hold 3s  → restart
-const int REED_RESET_MS      = 10000;  // hold 10s → wipe config + restart into portal
 const int NTP_TIMEOUT_MS     = 10000;
 const int CMD_LISTEN_MS      = 2000;
 const int WIFI_TIMEOUT_MS    = 10000;  // max time waiting for WiFi association
@@ -309,7 +315,6 @@ struct Config {
   // GPIO pin assignments — configurable to accommodate hardware variations
   int     moisturePin;   // default 0  (A0/GPIO0)
   int     batteryPin;    // default 1  (A1/GPIO1)
-  int     reedPin;       // default -1 (Disabled / Unassigned)
   int     sensorPowerPin; // default -1 (Disabled / Constant 3.3V rail)
   // FOTA update channel — "stable" (default) or "beta"
   char    fwChannel[8];  // selects stable (/releases/latest) or beta (/releases)
@@ -407,7 +412,6 @@ void loadConfig() {
 
   cfg.moisturePin = prefs.getInt("moisturePin", 0);
   cfg.batteryPin  = prefs.getInt("batteryPin",  1);
-  cfg.reedPin     = prefs.getInt("reedPin",     -1);
   cfg.sensorPowerPin = prefs.getInt("powerPin", -1);
 
   prefs.getString("fwChannel", cfg.fwChannel, sizeof(cfg.fwChannel));
@@ -431,9 +435,9 @@ void loadConfig() {
 }
 
 void validateConfig() {
-  const int pins[]        = { cfg.moisturePin, cfg.batteryPin, cfg.reedPin, cfg.sensorPowerPin };
-  const char* names[]     = { "moisturePin", "batteryPin", "reedPin", "sensorPowerPin" };
-  int pinCount = 4;
+  const int pins[]        = { cfg.moisturePin, cfg.batteryPin, cfg.sensorPowerPin };
+  const char* names[]     = { "moisturePin", "batteryPin", "sensorPowerPin" };
+  int pinCount = 3;
   for (int i = 0; i < pinCount; i++) {
     if (pins[i] < 0) continue;
     for (int j = i + 1; j < pinCount; j++) {
@@ -483,7 +487,6 @@ void saveConfig(const Config& c) {
   prefs.putInt("syslogPort",    c.syslogPort);
   prefs.putInt("moisturePin",   c.moisturePin);
   prefs.putInt("batteryPin",    c.batteryPin);
-  prefs.putInt("reedPin",       c.reedPin);
   prefs.putInt("powerPin",      c.sensorPowerPin);
   prefs.putString("fwChannel",  c.fwChannel);
   prefs.putInt("firstBootMin",  c.firstBootDelayMin);
@@ -641,7 +644,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
   h1{font-size:1.3em;color:#2c7a4b;margin-bottom:4px}
   p.sub{color:#666;font-size:.85em;margin-top:0}
   label{display:block;margin-top:14px;font-size:.9em;color:#333;font-weight:600}
-  input{width:100%;padding:8px;margin-top:4px;border:1px solid #ccc;
+  input,select{width:100%;padding:8px;margin-top:4px;border:1px solid #ccc;
     border-radius:6px;font-size:1em;box-sizing:border-box}
   .optional{color:#888;font-weight:400;font-size:.8em}
   .section{background:#fff;border-radius:10px;padding:16px;margin:16px 0;
@@ -781,7 +784,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
     <summary style="font-weight:600;font-size:.95em;color:#555;cursor:pointer;
       padding:10px 14px;background:#fff;border-radius:8px;
       box-shadow:0 1px 4px rgba(0,0,0,.08);list-style:none">
-      &#9654; Advanced — GPIO pin assignments
+      &#9654; Advanced Settings
     </summary>
     <div class="section" style="margin-top:0;border-top-left-radius:0;border-top-right-radius:0">
       <p class="hint" style="margin-top:0">Change only if your hardware uses different pins than the defaults.
@@ -793,15 +796,17 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
       <label>Battery voltage pin
         <input type="number" name="batteryPin" value="1" min="0" max="10">
       </label>
-      <p class="hint">Default: 1 (A1/GPIO1)</p>
-      <label>Reed switch pin
-        <input type="number" name="reedPin" value="-1" min="-1" max="10">
-      </label>
-      <p class="hint">Default: -1 (Disabled)</p>
       <label>Sensor power pin
         <input type="number" name="sensorPowerPin" value="-1" min="-1" max="10">
       </label>
       <p class="hint">Default: -1 (Disabled / Constant 3.3V rail)</p>
+      <label>Update channel
+        <select name="fwChannel">
+          <option value="stable">stable</option>
+          <option value="beta">beta</option>
+        </select>
+      </label>
+      <p class="hint">Default: stable (Select 'beta' for pre-releases)</p>
     </div>
   </details>
 
@@ -902,17 +907,13 @@ function validateForm(e) {
     return fail(e, 'Syslog port must be between 1 and 65535.');
   var mPin = parseInt(v('moisturePin'),10);
   var bPin = parseInt(v('batteryPin'),10);
-  var rPin = parseInt(v('reedPin'),10);
   var pPin = parseInt(v('sensorPowerPin'),10);
   if (isNaN(mPin)||mPin<0||mPin>10) return fail(e, 'Moisture pin must be between 0 and 10.');
   if (isNaN(bPin)||bPin<0||bPin>10) return fail(e, 'Battery pin must be between 0 and 10.');
-  if (isNaN(rPin)||rPin<-1||rPin>10) return fail(e, 'Reed switch pin must be between -1 and 10.');
   if (isNaN(pPin)||pPin<-1||pPin>10) return fail(e, 'Sensor power pin must be between -1 and 10.');
   if (mPin===bPin)
     return fail(e, 'Moisture and battery pins must be different.');
-  if (rPin>=0 && (rPin===mPin||rPin===bPin))
-    return fail(e, 'Reed switch pin conflicts with another assigned pin.');
-  if (pPin>=0 && (pPin===mPin||pPin===bPin||(rPin>=0 && pPin===rPin)))
+  if (pPin>=0 && (pPin===mPin||pPin===bPin))
     return fail(e, 'Sensor power pin conflicts with another assigned pin.');
 }
 document.querySelector('form').addEventListener('submit', validateForm);
@@ -1087,18 +1088,20 @@ static String validateSave() {
   // ── GPIO pin assignments ─────────────────────────────────
   int mPin = server.arg("moisturePin").toInt();
   int bPin = server.arg("batteryPin").toInt();
-  int rPin = server.arg("reedPin").toInt();
   int pPin = server.arg("sensorPowerPin").toInt();
   if (mPin < 0 || mPin > 10) return "Moisture pin must be between 0 and 10.";
   if (bPin < 0 || bPin > 10) return "Battery pin must be between 0 and 10.";
-  if (rPin < -1 || rPin > 10) return "Reed switch pin must be between -1 and 10.";
   if (pPin < -1 || pPin > 10) return "Sensor power pin must be between -1 and 10.";
   if (mPin == bPin)
     return "Moisture and battery pins must be different.";
-  if (rPin >= 0 && (rPin == mPin || rPin == bPin))
-    return "Reed switch pin conflicts with another assigned pin.";
-  if (pPin >= 0 && (pPin == mPin || pPin == bPin || (rPin >= 0 && pPin == rPin)))
+  if (pPin >= 0 && (pPin == mPin || pPin == bPin))
     return "Sensor power pin conflicts with another assigned pin.";
+
+  // ── Update channel (optional) ───────────────────────────
+  String fwChannel = server.arg("fwChannel");
+  if (fwChannel.length() > 0 && fwChannel != "stable" && fwChannel != "beta") {
+    return "Update channel must be 'stable' or 'beta'.";
+  }
 
   return "";  // all good
 }
@@ -1125,7 +1128,18 @@ static void sendError(const String& reason) {
 // ═══════════════════════════════════════════════════════════
 
 void handleRoot() {
-  server.send_P(200, "text/html", CONFIG_HTML);
+  // Check if we are running a beta or dev build. If so, default the channel in the portal to "beta".
+  bool isBetaOrDev = (strchr(FIRMWARE_VERSION, '-') != NULL);
+  const char* defaultChannel = isBetaOrDev ? "beta" : "stable";
+
+  // Load CONFIG_HTML and pre-select the appropriate channel dropdown option
+  String html = String(CONFIG_HTML);
+  if (strcmp(defaultChannel, "beta") == 0) {
+    html.replace("<option value=\"beta\">beta</option>", "<option value=\"beta\" selected>beta</option>");
+  } else {
+    html.replace("<option value=\"stable\">stable</option>", "<option value=\"stable\" selected>stable</option>");
+  }
+  server.send(200, "text/html", html);
 }
 
 void handleSave() {
@@ -1171,8 +1185,12 @@ void handleSave() {
 
   c.moisturePin = server.arg("moisturePin").toInt();
   c.batteryPin  = server.arg("batteryPin").toInt();
-  c.reedPin     = server.arg("reedPin").toInt();
   c.sensorPowerPin = server.arg("sensorPowerPin").toInt();
+
+  strlcpy(c.fwChannel, server.arg("fwChannel").c_str(), sizeof(c.fwChannel));
+  if (strlen(c.fwChannel) == 0) {
+    strlcpy(c.fwChannel, "stable", sizeof(c.fwChannel));
+  }
 
   // Preserve MQTT-only fields that have no portal form input.
   // Use the default when config was never loaded (fresh provision or post-wipe)
@@ -1499,52 +1517,7 @@ void getTimestamp(char* buf, size_t len) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  REED SWITCH
-// ═══════════════════════════════════════════════════════════
 
-void checkReedSwitch() {
-  if (cfg.reedPin < 0) {
-    return;
-  }
-  gpio_hold_dis((gpio_num_t)cfg.reedPin);
-  pinMode(cfg.reedPin, INPUT_PULLUP);
-  delay(50);
-
-  if (digitalRead(cfg.reedPin) == LOW) {
-    logf("Reed      — magnet detected, waiting to confirm...\n");
-    unsigned long holdStart  = millis();
-    bool          restartArmed = false;
-
-    while (digitalRead(cfg.reedPin) == LOW) {
-      unsigned long held = millis() - holdStart;
-
-      if (held >= REED_RESET_MS) {
-        logf("Reed      — 10s hold: wiping config, restarting into portal\n");
-        Serial.flush();
-        delay(200);
-        clearConfig();
-        ESP.restart();
-      }
-
-      if (!restartArmed && held >= REED_RESTART_MS) {
-        restartArmed = true;
-        logf("Reed      — 3s hold: release to restart, keep holding for 10s to wipe config\n");
-      }
-
-      delay(50);
-    }
-
-    if (restartArmed) {
-      logf("Reed      — released, restarting\n");
-      Serial.flush();
-      delay(200);
-      ESP.restart();
-    } else {
-      logf("Reed      — magnet removed early, ignoring\n");
-    }
-  }
-}
 
 // ═══════════════════════════════════════════════════════════
 //  SENSORS
@@ -1559,21 +1532,7 @@ void goToSleep(int minutes) {
 
   logf("Sleep     — going to sleep for %d minutes\n", minutes);
 
-  if (cfg.reedPin >= 0) {
-    // Enable GPIO wakeup so a magnet presentation wakes the device immediately.
-    // INPUT_PULLUP keeps the pin HIGH (reed open); closing to GND fires the wake.
-    // The pullup state is retained during deep sleep so no spurious wakeups occur.
-    pinMode(cfg.reedPin, INPUT_PULLUP);
-    
-    // Enable GPIO hold so that the pullup remains active even during deep sleep when
-    // peripheral power is lost.
-    gpio_hold_en((gpio_num_t)cfg.reedPin);
-#if !SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP
-    gpio_deep_sleep_hold_en();
-#endif
 
-    esp_deep_sleep_enable_gpio_wakeup(1ULL << cfg.reedPin, ESP_GPIO_WAKEUP_GPIO_LOW);
-  }
 
   Serial.flush();
   delay(50);  // allow last syslog UDP packet to transmit before radio shuts down
@@ -2082,13 +2041,13 @@ void publishConfigState() {
     "{\"mqttBroker\":\"%s\",\"mqttPort\":%d,"
     "\"mqttUser\":\"%s\",\"mqttPassword\":\"***\","
     "\"syslogHost\":\"%s\",\"syslogPort\":%d,"
-    "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d,\"sensorPowerPin\":%d,"
+    "\"moisturePin\":%d,\"batteryPin\":%d,\"sensorPowerPin\":%d,"
     "\"staticIP\":%s,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"dns\":\"%s\","
     "\"fwChannel\":\"%s\",\"firstBootDelayMin\":%d,\"sleepMinutes\":%d}",
     cfg.mqttBroker, cfg.mqttPort,
     cfg.mqttUser,
     cfg.syslogHost, cfg.syslogPort,
-    cfg.moisturePin, cfg.batteryPin, cfg.reedPin, cfg.sensorPowerPin,
+    cfg.moisturePin, cfg.batteryPin, cfg.sensorPowerPin,
     cfg.staticIP ? "true" : "false", ipStr, gwStr, snStr, dnsStr,
     cfg.fwChannel, cfg.firstBootDelayMin, cfg.sleepMinutes);
   mqtt.publish(CONFIG_STATE_TOPIC, payload, true);
@@ -2185,21 +2144,21 @@ void applyConfigChange() {
   if (pendingFields & PF_MOISTURE_PIN) {
     int p = atoi(pendingMoisturePin);
     if (p < 0 || p > 10) { logf("Config    — moisturePin rejected: must be 0-10\n"); }
-    else if (p == cfg.batteryPin || (cfg.reedPin >= 0 && p == cfg.reedPin) || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — moisturePin rejected: conflicts with another pin\n"); }
+    else if (p == cfg.batteryPin || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — moisturePin rejected: conflicts with another pin\n"); }
     else { cfg.moisturePin = p; logf("Config    — moisturePin -> %d\n", p); changed = true; }
   }
 
   if (pendingFields & PF_BATTERY_PIN) {
     int p = atoi(pendingBatteryPin);
     if (p < 0 || p > 10) { logf("Config    — batteryPin rejected: must be 0-10\n"); }
-    else if (p == cfg.moisturePin || (cfg.reedPin >= 0 && p == cfg.reedPin) || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — batteryPin rejected: conflicts with another pin\n"); }
+    else if (p == cfg.moisturePin || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — batteryPin rejected: conflicts with another pin\n"); }
     else { cfg.batteryPin = p; logf("Config    — batteryPin -> %d\n", p); changed = true; }
   }
 
   if (pendingFields & PF_SENSOR_POWER_PIN) {
     int p = atoi(pendingSensorPowerPin);
     if (p < -1 || p > 10) { logf("Config    — sensorPowerPin rejected: must be -1 to 10\n"); }
-    else if (p >= 0 && (p == cfg.moisturePin || p == cfg.batteryPin || (cfg.reedPin >= 0 && p == cfg.reedPin))) { logf("Config    — sensorPowerPin rejected: conflicts with another pin\n"); }
+    else if (p >= 0 && (p == cfg.moisturePin || p == cfg.batteryPin)) { logf("Config    — sensorPowerPin rejected: conflicts with another pin\n"); }
     else { cfg.sensorPowerPin = p; logf("Config    — sensorPowerPin -> %d\n", p); changed = true; }
   }
 
@@ -2374,16 +2333,13 @@ void setup() {
       logf("Wake      — timer\n");
       break;
     case ESP_SLEEP_WAKEUP_GPIO:
-      logf("Wake      — GPIO (reed switch)\n");
+      logf("Wake      — GPIO\n");
       break;
     default:
       logf("Wake      — cold boot or unexpected (cause=%d)\n",
            (int)esp_sleep_get_wakeup_cause());
       break;
   }
-
-  // ── Reed switch check ─────────────────────────────────────
-  checkReedSwitch();
 
   // ── Boot button check — hold for 3s to force reconfiguration ──
   pinMode(BTN_BOOT, INPUT_PULLUP);
