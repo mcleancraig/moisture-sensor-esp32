@@ -16,8 +16,8 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 - Automatic firmware updates via FOTA from GitHub Releases
 - Boot button reconfiguration — no reflashing needed to change settings
 - Reed switch restart — hold magnet to restart without opening enclosure
-- MQTT command support — send `reset` or `restart` remotely via retained message
-- Deep sleep between readings — ~15 minute cycle for long battery life
+- MQTT command support — send `reset` remotely via retained message
+- Deep sleep between readings — configurable interval (default 120 minutes) for long battery life
 - NTP timestamp in every MQTT payload
 - Firmware version reported in every MQTT payload
 
@@ -144,10 +144,6 @@ Publish a retained message to `garden/sensorN/cmd`. The sensor receives it on it
 mosquitto_pub -h localhost -u USER -P PASS \
   -t "garden/sensor1/cmd" -m "reset" --retain
 
-# Soft restart only:
-mosquitto_pub -h localhost -u USER -P PASS \
-  -t "garden/sensor1/cmd" -m "restart" --retain
-
 # Cancel a pending command:
 mosquitto_pub -h localhost -u USER -P PASS \
   -t "garden/sensor1/cmd" -m "" --retain
@@ -187,7 +183,7 @@ The device card also shows the firmware version (`sw_version`) on the device inf
 | Topic | Direction | Content |
 |---|---|---|
 | `garden/sensor1/state` | Sensor to broker | JSON state payload |
-| `garden/sensor1/cmd` | Broker to sensor | Command: `reset` or `restart` (retained) |
+| `garden/sensor1/cmd` | Broker to sensor | Command: `reset` (retained) |
 | `homeassistant/sensor/sensor1_moisture/config` | Sensor to broker | HA discovery config (retained) |
 | `homeassistant/sensor/sensor1_battery_v/config` | Sensor to broker | HA discovery config (retained) |
 | `homeassistant/sensor/sensor1_battery_pct/config` | Sensor to broker | HA discovery config (retained) |

@@ -3,6 +3,45 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.0.0] — 2026-07-04
+
+### Added
+- **Wi-Fi Fast Connect Caching** — Implemented caching of successful Wi-Fi channel and BSSID in RTC SRAM. Speeds up subsequent connection attempts to ~200ms under optimal conditions.
+- **Deep Sleep GPIO Pull-up Hold** — Maintains the Reed switch internal pull-up during deep sleep to prevent spurious wakeups, using conditional compilation to support the ESP32-C6's single-pin hold mechanism.
+- **Sleep Interval MQTT/HA control** — `config/set/sleepMinutes` and a "Sleep Interval" number entity (1-720 min) let you change how long the sensor sleeps between wake cycles without reflashing.
+
+### Changed
+- **Home Assistant Discovery Topic Refactoring** — Removed 25 redundant global `char[128]` buffer arrays, saving **3,200 bytes of permanent dynamic RAM (BSS)**. Discovery topics are now formatted dynamically on-the-fly.
+- **Shared Device JSON Helper** — Extracted duplicate Home Assistant `device` JSON construction logic into a static `getDeviceJSON()` helper function, saving **914 bytes of program Flash memory**.
+- **Consolidated Telemetry JSON Construction** — Replaced three duplicate, verbose `snprintf()` blocks in `setup()` with a clean conditional single-pass composer, reducing Flash footprint.
+- **Log Buffer & Stack Optimization** — Removed the redundant `char sysline[120]` stack buffer from `_logf()`, reducing active stack overhead by **120 bytes** for all print operations.
+- **Secure FOTA Certificate Bundle** — Replaced `client.setInsecure()` with secure validation using ESP32's built-in root CA certificate bundle (`esp_crt_bundle_attach` via a `SecureClient` wrapper) to properly and safely validate HTTPS connections and redirects.
+- **"Update on next wake" button renamed "Force check on next wake"** — Renamed this control under a clearer name.
+
+### Removed
+- **Restart MQTT/HA control** — the Restart button and `garden/sensorN/cmd` `restart` command are gone. No longer applicable now the device already restarts every wake as part of its normal sleep cycle. `reset` (full config wipe + portal) is unaffected.
+- **Reed Switch Pin MQTT/HA control** — the "Reed Switch Pin" number entity and `config/set/reedPin` are gone. `reedPin` is now portal-only, matching `wifiSSID`/`unitNumber`. The reed switch itself (hold 3s to restart, hold 10s to wipe config, GPIO wakeup) is unchanged.
+
+### Upgrade notes
+- After every sensor is running v3.0.0+, run `cleanup-mqtt-retained.sh` against your broker to clear the retained Restart button discovery config and the Reed Switch Pin discovery config — neither is republished or cleared automatically by the firmware change alone.
+
+## [3.0.0-b04] — 2026-07-04
+
+### Changed
+- **Home Assistant Discovery Topic Refactoring** — Removed 25 redundant global `char[128]` buffer arrays, saving **3,200 bytes of permanent dynamic RAM (BSS)**. Discovery topics are now formatted dynamically on-the-fly.
+- **Shared Device JSON Helper** — Extracted duplicate Home Assistant `device` JSON construction logic into a static `getDeviceJSON()` helper function, saving **914 bytes of program Flash memory**.
+- **Consolidated Telemetry JSON Construction** — Replaced three duplicate, verbose `snprintf()` blocks in `setup()` with a clean conditional single-pass composer, reducing Flash footprint.
+- **Log Buffer & Stack Optimization** — Removed the redundant `char sysline[120]` stack buffer from `_logf()`, reducing active stack overhead by **120 bytes** for all print operations.
+
+## [3.0.0-b03] — 2026-07-04
+
+### Added
+- **Wi-Fi Fast Connect Caching (Optimization 2)** — Implemented caching of successful Wi-Fi channel and BSSID in RTC SRAM. Speeds up subsequent connection attempts to ~200ms under optimal conditions, falling back to a full scan if fast connect fails within 4 seconds.
+- **Deep Sleep GPIO Pull-up Hold (Optimization 4)** — Maintains the Reed switch internal pull-up during deep sleep to prevent spurious wakeups, using conditional compilation to support the ESP32-C6's single-pin hold mechanism.
+
+### Changed
+- **Secure FOTA Certificate Bundle (Optimization 3)** — Replaced `client.setInsecure()` with secure validation using ESP32's built-in root CA certificate bundle (`esp_crt_bundle_attach` via a `SecureClient` wrapper) to properly and safely validate HTTPS connections and redirects.
+
 ## [2.11.0] — 2026-07-01
 
 ### Fixed

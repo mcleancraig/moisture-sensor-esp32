@@ -18,6 +18,10 @@ Items identified during v2 development for future releases.
 
 - [ ] **PCB design** — replace breadboard/perfboard wiring with a custom 2-layer PCB. Castellated footprint for the XIAO ESP32-C6, HW-390 JST connector, 2x 200k voltage divider resistors, 100nF bypass cap, BAT+/BAT- pads. Fabricate via JLCPCB. Reduces assembly time per unit from ~30 min to ~5 min.
 
+## Power
+
+- [ ] **Power-gate the soil moisture sensor** — the HW-390's VCC is wired directly to the 3V3 rail, drawing 5–10 mA continuously including during deep sleep. Fix: wire sensor VCC to a free GPIO (e.g. GPIO4), drive it HIGH just before the ADC read, wait ~80 ms to stabilise, sample, then pull LOW before sleeping. Reduces deep-sleep current from ~5000 µA to ~20 µA — a 99.6% saving. Add `moisturePowerPin` as a config field (portal + NVS) so the pin can be set per-unit without reflashing.
+
 ## Scalability
 
 - [ ] **Zigbee mesh migration** — the ESP32-C6 supports Zigbee 3.0 natively. For deployments beyond 15 sensors, or where battery life becomes a concern, reflash units as Zigbee end devices with one unit acting as coordinator (USB-powered, connected to Pi). Requires ESP-IDF rather than Arduino. Zigbee transmit current is significantly lower than WiFi, extending battery life considerably.
