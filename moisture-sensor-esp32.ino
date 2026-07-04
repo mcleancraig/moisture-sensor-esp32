@@ -309,7 +309,7 @@ struct Config {
   // GPIO pin assignments — configurable to accommodate hardware variations
   int     moisturePin;   // default 0  (A0/GPIO0)
   int     batteryPin;    // default 1  (A1/GPIO1)
-  int     reedPin;       // default 2  (D2/GPIO2)
+  int     reedPin;       // default -1 (Disabled / Unassigned)
   int     sensorPowerPin; // default -1 (Disabled / Constant 3.3V rail)
   // FOTA update channel — "stable" (default) or "beta"
   char    fwChannel[8];  // selects stable (/releases/latest) or beta (/releases)
@@ -407,7 +407,7 @@ void loadConfig() {
 
   cfg.moisturePin = prefs.getInt("moisturePin", 0);
   cfg.batteryPin  = prefs.getInt("batteryPin",  1);
-  cfg.reedPin     = prefs.getInt("reedPin",     2);
+  cfg.reedPin     = prefs.getInt("reedPin",     -1);
   cfg.sensorPowerPin = prefs.getInt("powerPin", -1);
 
   prefs.getString("fwChannel", cfg.fwChannel, sizeof(cfg.fwChannel));
@@ -433,9 +433,11 @@ void loadConfig() {
 void validateConfig() {
   const int pins[]        = { cfg.moisturePin, cfg.batteryPin, cfg.reedPin, cfg.sensorPowerPin };
   const char* names[]     = { "moisturePin", "batteryPin", "reedPin", "sensorPowerPin" };
-  int pinCount = cfg.sensorPowerPin >= 0 ? 4 : 3;
+  int pinCount = 4;
   for (int i = 0; i < pinCount; i++) {
+    if (pins[i] < 0) continue;
     for (int j = i + 1; j < pinCount; j++) {
+      if (pins[j] < 0) continue;
       if (pins[i] == pins[j]) {
         logf("Config    — WARNING: %s and %s share GPIO%d\n",
              names[i], names[j], pins[i]);
@@ -793,9 +795,9 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
       </label>
       <p class="hint">Default: 1 (A1/GPIO1)</p>
       <label>Reed switch pin
-        <input type="number" name="reedPin" value="2" min="0" max="10">
+        <input type="number" name="reedPin" value="-1" min="-1" max="10">
       </label>
-      <p class="hint">Default: 3 (D3/GPIO3)</p>
+      <p class="hint">Default: -1 (Disabled)</p>
       <label>Sensor power pin
         <input type="number" name="sensorPowerPin" value="-1" min="-1" max="10">
       </label>
@@ -904,11 +906,13 @@ function validateForm(e) {
   var pPin = parseInt(v('sensorPowerPin'),10);
   if (isNaN(mPin)||mPin<0||mPin>10) return fail(e, 'Moisture pin must be between 0 and 10.');
   if (isNaN(bPin)||bPin<0||bPin>10) return fail(e, 'Battery pin must be between 0 and 10.');
-  if (isNaN(rPin)||rPin<0||rPin>10) return fail(e, 'Reed switch pin must be between 0 and 10.');
+  if (isNaN(rPin)||rPin<-1||rPin>10) return fail(e, 'Reed switch pin must be between -1 and 10.');
   if (isNaN(pPin)||pPin<-1||pPin>10) return fail(e, 'Sensor power pin must be between -1 and 10.');
-  if (mPin===bPin||mPin===rPin||bPin===rPin)
-    return fail(e, 'Moisture, battery and reed switch pins must all be different.');
-  if (pPin>=0 && (pPin===mPin||pPin===bPin||pPin===rPin))
+  if (mPin===bPin)
+    return fail(e, 'Moisture and battery pins must be different.');
+  if (rPin>=0 && (rPin===mPin||rPin===bPin))
+    return fail(e, 'Reed switch pin conflicts with another assigned pin.');
+  if (pPin>=0 && (pPin===mPin||pPin===bPin||(rPin>=0 && pPin===rPin)))
     return fail(e, 'Sensor power pin conflicts with another assigned pin.');
 }
 document.querySelector('form').addEventListener('submit', validateForm);
@@ -1087,11 +1091,13 @@ static String validateSave() {
   int pPin = server.arg("sensorPowerPin").toInt();
   if (mPin < 0 || mPin > 10) return "Moisture pin must be between 0 and 10.";
   if (bPin < 0 || bPin > 10) return "Battery pin must be between 0 and 10.";
-  if (rPin < 0 || rPin > 10) return "Reed switch pin must be between 0 and 10.";
+  if (rPin < -1 || rPin > 10) return "Reed switch pin must be between -1 and 10.";
   if (pPin < -1 || pPin > 10) return "Sensor power pin must be between -1 and 10.";
-  if (mPin == bPin || mPin == rPin || bPin == rPin)
-    return "Moisture, battery and reed switch pins must all be different.";
-  if (pPin >= 0 && (pPin == mPin || pPin == bPin || pPin == rPin))
+  if (mPin == bPin)
+    return "Moisture and battery pins must be different.";
+  if (rPin >= 0 && (rPin == mPin || rPin == bPin))
+    return "Reed switch pin conflicts with another assigned pin.";
+  if (pPin >= 0 && (pPin == mPin || pPin == bPin || (rPin >= 0 && pPin == rPin)))
     return "Sensor power pin conflicts with another assigned pin.";
 
   return "";  // all good
@@ -1285,10 +1291,10 @@ void checkForUpdate() {
     return;
   }
 
-  // 24h gate — bypass when forced.
+  // 24h gate — bypass when forced, on beta channel, or running a beta/dev build.
   // lastFotaCheck resets on hard reset/OTA restart so a check always happens
   // on first wake after a firmware change even without forcing.
-  if (!isForced && hasValidEpoch() && lastFotaCheck > 0
+  if (!isForced && !isBeta && !isDev && hasValidEpoch() && lastFotaCheck > 0
       && (time(nullptr) - lastFotaCheck) < 86400) {
     logf("FOTA      — skipped (checked %ldh ago)\n",
          (long)(time(nullptr) - lastFotaCheck) / 3600);
@@ -1498,6 +1504,9 @@ void getTimestamp(char* buf, size_t len) {
 // ═══════════════════════════════════════════════════════════
 
 void checkReedSwitch() {
+  if (cfg.reedPin < 0) {
+    return;
+  }
   gpio_hold_dis((gpio_num_t)cfg.reedPin);
   pinMode(cfg.reedPin, INPUT_PULLUP);
   delay(50);
@@ -1550,19 +1559,21 @@ void goToSleep(int minutes) {
 
   logf("Sleep     — going to sleep for %d minutes\n", minutes);
 
-  // Enable GPIO wakeup so a magnet presentation wakes the device immediately.
-  // INPUT_PULLUP keeps the pin HIGH (reed open); closing to GND fires the wake.
-  // The pullup state is retained during deep sleep so no spurious wakeups occur.
-  pinMode(cfg.reedPin, INPUT_PULLUP);
-  
-  // Enable GPIO hold so that the pullup remains active even during deep sleep when
-  // peripheral power is lost.
-  gpio_hold_en((gpio_num_t)cfg.reedPin);
+  if (cfg.reedPin >= 0) {
+    // Enable GPIO wakeup so a magnet presentation wakes the device immediately.
+    // INPUT_PULLUP keeps the pin HIGH (reed open); closing to GND fires the wake.
+    // The pullup state is retained during deep sleep so no spurious wakeups occur.
+    pinMode(cfg.reedPin, INPUT_PULLUP);
+    
+    // Enable GPIO hold so that the pullup remains active even during deep sleep when
+    // peripheral power is lost.
+    gpio_hold_en((gpio_num_t)cfg.reedPin);
 #if !SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP
-  gpio_deep_sleep_hold_en();
+    gpio_deep_sleep_hold_en();
 #endif
 
-  esp_deep_sleep_enable_gpio_wakeup(1ULL << cfg.reedPin, ESP_GPIO_WAKEUP_GPIO_LOW);
+    esp_deep_sleep_enable_gpio_wakeup(1ULL << cfg.reedPin, ESP_GPIO_WAKEUP_GPIO_LOW);
+  }
 
   Serial.flush();
   delay(50);  // allow last syslog UDP packet to transmit before radio shuts down
@@ -2174,21 +2185,21 @@ void applyConfigChange() {
   if (pendingFields & PF_MOISTURE_PIN) {
     int p = atoi(pendingMoisturePin);
     if (p < 0 || p > 10) { logf("Config    — moisturePin rejected: must be 0-10\n"); }
-    else if (p == cfg.batteryPin || p == cfg.reedPin || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — moisturePin rejected: conflicts with another pin\n"); }
+    else if (p == cfg.batteryPin || (cfg.reedPin >= 0 && p == cfg.reedPin) || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — moisturePin rejected: conflicts with another pin\n"); }
     else { cfg.moisturePin = p; logf("Config    — moisturePin -> %d\n", p); changed = true; }
   }
 
   if (pendingFields & PF_BATTERY_PIN) {
     int p = atoi(pendingBatteryPin);
     if (p < 0 || p > 10) { logf("Config    — batteryPin rejected: must be 0-10\n"); }
-    else if (p == cfg.moisturePin || p == cfg.reedPin || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — batteryPin rejected: conflicts with another pin\n"); }
+    else if (p == cfg.moisturePin || (cfg.reedPin >= 0 && p == cfg.reedPin) || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — batteryPin rejected: conflicts with another pin\n"); }
     else { cfg.batteryPin = p; logf("Config    — batteryPin -> %d\n", p); changed = true; }
   }
 
   if (pendingFields & PF_SENSOR_POWER_PIN) {
     int p = atoi(pendingSensorPowerPin);
     if (p < -1 || p > 10) { logf("Config    — sensorPowerPin rejected: must be -1 to 10\n"); }
-    else if (p >= 0 && (p == cfg.moisturePin || p == cfg.batteryPin || p == cfg.reedPin)) { logf("Config    — sensorPowerPin rejected: conflicts with another pin\n"); }
+    else if (p >= 0 && (p == cfg.moisturePin || p == cfg.batteryPin || (cfg.reedPin >= 0 && p == cfg.reedPin))) { logf("Config    — sensorPowerPin rejected: conflicts with another pin\n"); }
     else { cfg.sensorPowerPin = p; logf("Config    — sensorPowerPin -> %d\n", p); changed = true; }
   }
 
