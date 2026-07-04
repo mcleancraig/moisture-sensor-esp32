@@ -3,6 +3,18 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.0.1-b01] — 2026-07-04
+
+### Added
+- **Configurable On-Demand Sensor Power Pin (`sensorPowerPin`)** — Adds support for powering the soil moisture sensor via a configurable GPIO pin (NVS key `powerPin`, defaults to `-1` for continuous rail power).
+- **Parallel Power Stabilization** — Drives the sensor power pin `HIGH` early during boot to overlap the 500ms stabilization period with other boot checks, minimizing wake time. Bypasses the 500ms delay and uses a quick 200ms settling window when running off the continuous rail.
+- **Deep Sleep Tri-stating** — Drives the power pin `LOW` and sets it to high-impedance `INPUT` mode (tri-state) during deep sleep to completely eliminate parasitic leakage current.
+- **Beta FOTA Rate-Limit Bypass** — Bypasses the 24-hour rate limit gate for sensors subscribed to the `beta` update channel or running a beta/dev firmware version, allowing update checks on every boot.
+
+### Changed
+- **Default Reed Switch Pin to Disabled** — Defaulted `reedPin` load value to `-1` (disabled) instead of `2` inside NVS for new installations.
+- **Smart Pin-Conflict Checking** — Updated both boot validation, captive portal client/server validation, and MQTT remote config pin conflict checking to safely skip negative (disabled) pins, preventing false conflicts.
+
 ## [3.0.0] — 2026-07-04
 
 ### Added
