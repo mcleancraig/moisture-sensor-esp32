@@ -310,6 +310,7 @@ struct Config {
   int     moisturePin;   // default 0  (A0/GPIO0)
   int     batteryPin;    // default 1  (A1/GPIO1)
   int     reedPin;       // default 2  (D2/GPIO2)
+  int     sensorPowerPin; // default -1 (Disabled / Constant 3.3V rail)
   // FOTA update channel — "stable" (default) or "beta"
   char    fwChannel[8];  // selects stable (/releases/latest) or beta (/releases)
   // First cold-boot delay — minutes to sleep before sending first full reading
@@ -324,6 +325,7 @@ struct MoistureReading {
 };
 
 bool configLoaded = false;
+unsigned long sensorPowerOnTime = 0;
 
 // ── Power optimisation: RTC memory ───────────────────────────────────────────
 // RTC SRAM survives deep sleep but is cleared on hard reset and OTA restart.
@@ -406,6 +408,7 @@ void loadConfig() {
   cfg.moisturePin = prefs.getInt("moisturePin", 0);
   cfg.batteryPin  = prefs.getInt("batteryPin",  1);
   cfg.reedPin     = prefs.getInt("reedPin",     2);
+  cfg.sensorPowerPin = prefs.getInt("powerPin", -1);
 
   prefs.getString("fwChannel", cfg.fwChannel, sizeof(cfg.fwChannel));
   if (strlen(cfg.fwChannel) == 0) strlcpy(cfg.fwChannel, "stable", sizeof(cfg.fwChannel));
@@ -428,10 +431,11 @@ void loadConfig() {
 }
 
 void validateConfig() {
-  const int pins[]        = { cfg.moisturePin, cfg.batteryPin, cfg.reedPin };
-  const char* names[]     = { "moisturePin", "batteryPin", "reedPin" };
-  for (int i = 0; i < 3; i++) {
-    for (int j = i + 1; j < 3; j++) {
+  const int pins[]        = { cfg.moisturePin, cfg.batteryPin, cfg.reedPin, cfg.sensorPowerPin };
+  const char* names[]     = { "moisturePin", "batteryPin", "reedPin", "sensorPowerPin" };
+  int pinCount = cfg.sensorPowerPin >= 0 ? 4 : 3;
+  for (int i = 0; i < pinCount; i++) {
+    for (int j = i + 1; j < pinCount; j++) {
       if (pins[i] == pins[j]) {
         logf("Config    — WARNING: %s and %s share GPIO%d\n",
              names[i], names[j], pins[i]);
@@ -478,6 +482,7 @@ void saveConfig(const Config& c) {
   prefs.putInt("moisturePin",   c.moisturePin);
   prefs.putInt("batteryPin",    c.batteryPin);
   prefs.putInt("reedPin",       c.reedPin);
+  prefs.putInt("powerPin",      c.sensorPowerPin);
   prefs.putString("fwChannel",  c.fwChannel);
   prefs.putInt("firstBootMin",  c.firstBootDelayMin);
   prefs.putInt("sleepMin",      c.sleepMinutes);
@@ -778,7 +783,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
     </summary>
     <div class="section" style="margin-top:0;border-top-left-radius:0;border-top-right-radius:0">
       <p class="hint" style="margin-top:0">Change only if your hardware uses different pins than the defaults.
-        All three pins must be different. Valid range: 0–10 (XIAO GPIO numbers).</p>
+        Valid range: 0–10 (XIAO GPIO numbers) or -1 for unassigned.</p>
       <label>Moisture sensor pin
         <input type="number" name="moisturePin" value="0" min="0" max="10">
       </label>
@@ -791,6 +796,10 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
         <input type="number" name="reedPin" value="2" min="0" max="10">
       </label>
       <p class="hint">Default: 3 (D3/GPIO3)</p>
+      <label>Sensor power pin
+        <input type="number" name="sensorPowerPin" value="-1" min="-1" max="10">
+      </label>
+      <p class="hint">Default: -1 (Disabled / Constant 3.3V rail)</p>
     </div>
   </details>
 
@@ -892,11 +901,15 @@ function validateForm(e) {
   var mPin = parseInt(v('moisturePin'),10);
   var bPin = parseInt(v('batteryPin'),10);
   var rPin = parseInt(v('reedPin'),10);
+  var pPin = parseInt(v('sensorPowerPin'),10);
   if (isNaN(mPin)||mPin<0||mPin>10) return fail(e, 'Moisture pin must be between 0 and 10.');
   if (isNaN(bPin)||bPin<0||bPin>10) return fail(e, 'Battery pin must be between 0 and 10.');
   if (isNaN(rPin)||rPin<0||rPin>10) return fail(e, 'Reed switch pin must be between 0 and 10.');
+  if (isNaN(pPin)||pPin<-1||pPin>10) return fail(e, 'Sensor power pin must be between -1 and 10.');
   if (mPin===bPin||mPin===rPin||bPin===rPin)
     return fail(e, 'Moisture, battery and reed switch pins must all be different.');
+  if (pPin>=0 && (pPin===mPin||pPin===bPin||pPin===rPin))
+    return fail(e, 'Sensor power pin conflicts with another assigned pin.');
 }
 document.querySelector('form').addEventListener('submit', validateForm);
 </script>
@@ -1071,11 +1084,15 @@ static String validateSave() {
   int mPin = server.arg("moisturePin").toInt();
   int bPin = server.arg("batteryPin").toInt();
   int rPin = server.arg("reedPin").toInt();
+  int pPin = server.arg("sensorPowerPin").toInt();
   if (mPin < 0 || mPin > 10) return "Moisture pin must be between 0 and 10.";
   if (bPin < 0 || bPin > 10) return "Battery pin must be between 0 and 10.";
   if (rPin < 0 || rPin > 10) return "Reed switch pin must be between 0 and 10.";
+  if (pPin < -1 || pPin > 10) return "Sensor power pin must be between -1 and 10.";
   if (mPin == bPin || mPin == rPin || bPin == rPin)
     return "Moisture, battery and reed switch pins must all be different.";
+  if (pPin >= 0 && (pPin == mPin || pPin == bPin || pPin == rPin))
+    return "Sensor power pin conflicts with another assigned pin.";
 
   return "";  // all good
 }
@@ -1149,6 +1166,7 @@ void handleSave() {
   c.moisturePin = server.arg("moisturePin").toInt();
   c.batteryPin  = server.arg("batteryPin").toInt();
   c.reedPin     = server.arg("reedPin").toInt();
+  c.sensorPowerPin = server.arg("sensorPowerPin").toInt();
 
   // Preserve MQTT-only fields that have no portal form input.
   // Use the default when config was never loaded (fresh provision or post-wipe)
@@ -1524,6 +1542,12 @@ void checkReedSwitch() {
 // ═══════════════════════════════════════════════════════════
 
 void goToSleep(int minutes) {
+  if (configLoaded && cfg.sensorPowerPin >= 0) {
+    digitalWrite(cfg.sensorPowerPin, LOW);
+    pinMode(cfg.sensorPowerPin, INPUT);
+    logf("Power     — sensorPowerPin GPIO%d set LOW & INPUT (tri-stated for deep sleep)\n", cfg.sensorPowerPin);
+  }
+
   logf("Sleep     — going to sleep for %d minutes\n", minutes);
 
   // Enable GPIO wakeup so a magnet presentation wakes the device immediately.
@@ -1547,7 +1571,18 @@ void goToSleep(int minutes) {
 }
 
 MoistureReading readMoisture() {
-  delay(500);
+  if (cfg.sensorPowerPin >= 0) {
+    // Wait only for the remaining fractional window of the 500ms stabilization period
+    unsigned long elapsed = millis() - sensorPowerOnTime;
+    if (elapsed < 500) {
+      delay(500 - elapsed);
+    }
+  } else {
+    // Running off the continuous rail; bypass 500ms startup delay and use a small
+    // 200ms window to let the ESP32's ADC internal reference stabilize, saving wake-time.
+    delay(200);
+  }
+
   long sum = 0;
   for (int i = 0; i < 10; i++) {
     sum += analogReadMilliVolts(cfg.moisturePin);
@@ -1694,6 +1729,7 @@ static char pendingSyslogHost[64]    = "";
 static char pendingSyslogPort[8]     = "";
 static char pendingMoisturePin[4]    = "";
 static char pendingBatteryPin[4]     = "";
+static char pendingSensorPowerPin[4] = "";
 static char pendingStaticIP[8]       = "";  // "true" or "false"
 static char pendingIP[16]            = "";
 static char pendingGW[16]            = "";
@@ -1719,6 +1755,7 @@ static uint32_t pendingFields        = 0;   // bitmask — which fields arrived 
 #define PF_FW_CHANNEL          (1<<14)
 #define PF_FIRST_BOOT_DELAY    (1<<15)
 #define PF_SLEEP_MINUTES       (1<<16)
+#define PF_SENSOR_POWER_PIN    (1<<17)
 
 // ── IMPORTANT: callback safety rules ────────────────────────
 // PubSubClient passes topic and payload as pointers INTO its internal buffer.
@@ -1785,6 +1822,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     else if (strcmp(fieldName, "syslogPort")   == 0) { strlcpy(pendingSyslogPort,   val, sizeof(pendingSyslogPort));   pendingFields |= PF_SYSLOG_PORT;   }
     else if (strcmp(fieldName, "moisturePin")  == 0) { strlcpy(pendingMoisturePin,  val, sizeof(pendingMoisturePin));  pendingFields |= PF_MOISTURE_PIN;  }
     else if (strcmp(fieldName, "batteryPin")   == 0) { strlcpy(pendingBatteryPin,   val, sizeof(pendingBatteryPin));   pendingFields |= PF_BATTERY_PIN;   }
+    else if (strcmp(fieldName, "sensorPowerPin") == 0) { strlcpy(pendingSensorPowerPin, val, sizeof(pendingSensorPowerPin)); pendingFields |= PF_SENSOR_POWER_PIN; }
     else if (strcmp(fieldName, "staticIP")    == 0) { strlcpy(pendingStaticIP,    val, sizeof(pendingStaticIP));    pendingFields |= PF_STATIC_IP;    }
     else if (strcmp(fieldName, "ip")          == 0) { strlcpy(pendingIP,          val, sizeof(pendingIP));          pendingFields |= PF_IP;           }
     else if (strcmp(fieldName, "gw")          == 0) { strlcpy(pendingGW,          val, sizeof(pendingGW));          pendingFields |= PF_GW;           }
@@ -2033,13 +2071,13 @@ void publishConfigState() {
     "{\"mqttBroker\":\"%s\",\"mqttPort\":%d,"
     "\"mqttUser\":\"%s\",\"mqttPassword\":\"***\","
     "\"syslogHost\":\"%s\",\"syslogPort\":%d,"
-    "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d,"
+    "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d,\"sensorPowerPin\":%d,"
     "\"staticIP\":%s,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"dns\":\"%s\","
     "\"fwChannel\":\"%s\",\"firstBootDelayMin\":%d,\"sleepMinutes\":%d}",
     cfg.mqttBroker, cfg.mqttPort,
     cfg.mqttUser,
     cfg.syslogHost, cfg.syslogPort,
-    cfg.moisturePin, cfg.batteryPin, cfg.reedPin,
+    cfg.moisturePin, cfg.batteryPin, cfg.reedPin, cfg.sensorPowerPin,
     cfg.staticIP ? "true" : "false", ipStr, gwStr, snStr, dnsStr,
     cfg.fwChannel, cfg.firstBootDelayMin, cfg.sleepMinutes);
   mqtt.publish(CONFIG_STATE_TOPIC, payload, true);
@@ -2072,6 +2110,7 @@ void applyConfigChange() {
       { PF_SYSLOG_PORT,      "syslogPort" },
       { PF_MOISTURE_PIN,     "moisturePin" },
       { PF_BATTERY_PIN,      "batteryPin" },
+      { PF_SENSOR_POWER_PIN, "sensorPowerPin" },
       { PF_STATIC_IP,        "staticIP" },
       { PF_IP,               "ip" },
       { PF_GW,               "gw" },
@@ -2135,15 +2174,22 @@ void applyConfigChange() {
   if (pendingFields & PF_MOISTURE_PIN) {
     int p = atoi(pendingMoisturePin);
     if (p < 0 || p > 10) { logf("Config    — moisturePin rejected: must be 0-10\n"); }
-    else if (p == cfg.batteryPin || p == cfg.reedPin) { logf("Config    — moisturePin rejected: conflicts with another pin\n"); }
+    else if (p == cfg.batteryPin || p == cfg.reedPin || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — moisturePin rejected: conflicts with another pin\n"); }
     else { cfg.moisturePin = p; logf("Config    — moisturePin -> %d\n", p); changed = true; }
   }
 
   if (pendingFields & PF_BATTERY_PIN) {
     int p = atoi(pendingBatteryPin);
     if (p < 0 || p > 10) { logf("Config    — batteryPin rejected: must be 0-10\n"); }
-    else if (p == cfg.moisturePin || p == cfg.reedPin) { logf("Config    — batteryPin rejected: conflicts with another pin\n"); }
+    else if (p == cfg.moisturePin || p == cfg.reedPin || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — batteryPin rejected: conflicts with another pin\n"); }
     else { cfg.batteryPin = p; logf("Config    — batteryPin -> %d\n", p); changed = true; }
+  }
+
+  if (pendingFields & PF_SENSOR_POWER_PIN) {
+    int p = atoi(pendingSensorPowerPin);
+    if (p < -1 || p > 10) { logf("Config    — sensorPowerPin rejected: must be -1 to 10\n"); }
+    else if (p >= 0 && (p == cfg.moisturePin || p == cfg.batteryPin || p == cfg.reedPin)) { logf("Config    — sensorPowerPin rejected: conflicts with another pin\n"); }
+    else { cfg.sensorPowerPin = p; logf("Config    — sensorPowerPin -> %d\n", p); changed = true; }
   }
 
   if (pendingFields & PF_STATIC_IP) {
@@ -2234,6 +2280,7 @@ void publishConfigDiscovery() {
     { "number", "Syslog Port",       "cfg_syslog_port",        "syslogPort",        "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\"" },
     { "number", "Moisture Pin",      "cfg_moisture_pin",       "moisturePin",       "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:water-percent\"" },
     { "number", "Battery Pin",       "cfg_battery_pin",        "batteryPin",        "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:battery\"" },
+    { "number", "Sensor Power Pin",  "cfg_sensor_power_pin",   "sensorPowerPin",    "\"min\":-1,\"max\":10,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:power\"" },
     { "text",   "IP Address",        "cfg_ip",                 "ip",                "\"max\":15,\"entity_category\":\"config\"" },
     { "text",   "Gateway",           "cfg_gw",                 "gw",                "\"max\":15,\"entity_category\":\"config\"" },
     { "text",   "Subnet Mask",       "cfg_sn",                 "sn",                "\"max\":15,\"entity_category\":\"config\"" },
@@ -2287,6 +2334,14 @@ void setup() {
   // ── Load config first so syslog server address is available ──
   loadConfig();
   validateConfig();
+
+  // ── Early sensor power-on for parallel stabilization ──
+  if (configLoaded && cfg.sensorPowerPin >= 0) {
+    pinMode(cfg.sensorPowerPin, OUTPUT);
+    digitalWrite(cfg.sensorPowerPin, HIGH);
+    sensorPowerOnTime = millis();
+    logf("Power     — sensorPowerPin GPIO%d set HIGH (stabilizing in parallel)\n", cfg.sensorPowerPin);
+  }
 
   // ── Wake / reset reason ───────────────────────────────────
   esp_reset_reason_t resetReason = esp_reset_reason();
