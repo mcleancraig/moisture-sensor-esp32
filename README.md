@@ -40,6 +40,7 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 | Battery | 18650 Li-ion, 2000mAh recommended |
 | Reverse polarity protection | None currently — P-channel MOSFET planned (see TODO) |
 | Battery voltage divider | 2x 200kOhm resistors (BAT+ to A0 to GND) |
+| Sensor power-gating | HW-390 VCC to D4 (GPIO4); configure `sensorPowerPin` in portal |
 
 ### Wiring
 
@@ -49,12 +50,16 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 
 18650 (−) ────────────────────────────── XIAO BAT− pad ── GND
 
-HW-390 VCC  ── XIAO 3V3
+HW-390 VCC  ── XIAO D4 (GPIO4)    ← power-gated (see note)
 HW-390 GND  ── GND
 HW-390 AOUT ── XIAO A1 (GPIO1)
 
 Reed switch ── GPIO3 ── GND  (normally open, INPUT_PULLUP)
 ```
+
+After first boot, set **Sensor Power Pin** to `4` in the config portal. The firmware drives D4 HIGH just before the ADC read and LOW before sleeping, so the HW-390 draws no current during deep sleep. Any free GPIO 0–10 can be used; D4 is recommended as it is otherwise unused.
+
+If power-gating is not wired, connect HW-390 VCC to XIAO 3V3 instead and leave Sensor Power Pin at `-1` (default).
 
 The XIAO's onboard charger handles battery charging automatically when USB-C is connected. USB and battery can be connected simultaneously — this is normal and required for charging.
 
