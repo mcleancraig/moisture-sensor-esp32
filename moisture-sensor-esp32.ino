@@ -9,6 +9,8 @@
 #include <time.h>
 #include "esp_mac.h"
 #include "esp_sleep.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include <esp_crt_bundle.h>
 #include <driver/gpio.h>
 
@@ -21,6 +23,15 @@ public:
   }
 };
 
+// ═══════════════════════════════════════════════════════════
+//  v3.0.1
+//  - Completely removed the unused Reed Switch code, including
+//    the portal input fields, JavaScript/server-side validation,
+//    dynamic MQTT configuration parsing, and the checkReedSwitch()
+//    loop.
+//  - Physical pin D2 (GPIO 2) is now fully unassigned and can
+//    be safely used for sensor power gating (configured as Sensor
+//    Power Pin = 2) without boot loop risks or conflict checks.
 // ═══════════════════════════════════════════════════════════
 //  v3.0.0
 //  - Removed the Restart MQTT/HA control (button + garden/sensorN/cmd
@@ -39,8 +50,8 @@ public:
 //    "Sleep Interval" number entity, 1-720 min) — replaces the hardcoded
 //    SLEEP_MINUTES constant as the default.
 //  - See cleanup-mqtt-retained.sh to clear retained broker state left by
-//    the Restart button and Reed Switch Pin control once the fleet is on
-//    v3.0.0+.
+//    the Restart button, Reed Switch Pin control, and remote config command
+//    topics once the fleet is on v3.0.1+.
 //
 //  v2.11.0
 //  - NVS magic: revert v2.10.2 tightening for the absent-magic case.
@@ -224,13 +235,12 @@ public:
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "3.0.0"
+#define FIRMWARE_VERSION "3.0.1"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
 const int BATTERY_PIN  = 1;   // A1 — voltage divider midpoint
 const int BTN_BOOT     = 9;   // Boot button on XIAO ESP32-C6
-const int REED_PIN     = 2;   // Reed switch — GND when magnet present
 
 // ── Fixed calibration ─────────────────────────────────────
 const int   DRY_MV         = 2800;
@@ -244,14 +254,13 @@ const int SLEEP_MINUTES      = 120;
 const int AP_TIMEOUT_MIN     = 10;
 const int AP_SLEEP_MIN       = 10;
 const int BOOT_HOLD_MS       = 3000;
-const int REED_RESTART_MS    = 3000;   // hold 3s  → restart
-const int REED_RESET_MS      = 10000;  // hold 10s → wipe config + restart into portal
 const int NTP_TIMEOUT_MS     = 10000;
 const int CMD_LISTEN_MS      = 2000;
 const int WIFI_TIMEOUT_MS    = 10000;  // max time waiting for WiFi association
 const int MQTT_TIMEOUT_S     =     5;  // TCP socket timeout per connect attempt
 const int FOTA_VERSION_TIMEOUT_MS = 8000;   // version.txt HTTP fetch
 const int FOTA_DL_TIMEOUT_MS      = 60000;  // firmware.bin download (large file)
+const int FOTA_MAX_RETRIES        = 3;      // failed boots before rollback
 
 // ── Thresholds ────────────────────────────────────────────
 #define LOW_BATTERY_PCT 15   // battery_pct at which low-battery alert fires
@@ -309,7 +318,7 @@ struct Config {
   // GPIO pin assignments — configurable to accommodate hardware variations
   int     moisturePin;   // default 0  (A0/GPIO0)
   int     batteryPin;    // default 1  (A1/GPIO1)
-  int     reedPin;       // default 2  (D2/GPIO2)
+  int     sensorPowerPin; // default -1 (Disabled / Constant 3.3V rail)
   // FOTA update channel — "stable" (default) or "beta"
   char    fwChannel[8];  // selects stable (/releases/latest) or beta (/releases)
   // First cold-boot delay — minutes to sleep before sending first full reading
@@ -324,6 +333,7 @@ struct MoistureReading {
 };
 
 bool configLoaded = false;
+unsigned long sensorPowerOnTime = 0;
 
 // ── Power optimisation: RTC memory ───────────────────────────────────────────
 // RTC SRAM survives deep sleep but is cleared on hard reset and OTA restart.
@@ -405,7 +415,7 @@ void loadConfig() {
 
   cfg.moisturePin = prefs.getInt("moisturePin", 0);
   cfg.batteryPin  = prefs.getInt("batteryPin",  1);
-  cfg.reedPin     = prefs.getInt("reedPin",     2);
+  cfg.sensorPowerPin = prefs.getInt("powerPin", -1);
 
   prefs.getString("fwChannel", cfg.fwChannel, sizeof(cfg.fwChannel));
   if (strlen(cfg.fwChannel) == 0) strlcpy(cfg.fwChannel, "stable", sizeof(cfg.fwChannel));
@@ -428,10 +438,13 @@ void loadConfig() {
 }
 
 void validateConfig() {
-  const int pins[]        = { cfg.moisturePin, cfg.batteryPin, cfg.reedPin };
-  const char* names[]     = { "moisturePin", "batteryPin", "reedPin" };
-  for (int i = 0; i < 3; i++) {
-    for (int j = i + 1; j < 3; j++) {
+  const int pins[]        = { cfg.moisturePin, cfg.batteryPin, cfg.sensorPowerPin };
+  const char* names[]     = { "moisturePin", "batteryPin", "sensorPowerPin" };
+  int pinCount = 3;
+  for (int i = 0; i < pinCount; i++) {
+    if (pins[i] < 0) continue;
+    for (int j = i + 1; j < pinCount; j++) {
+      if (pins[j] < 0) continue;
       if (pins[i] == pins[j]) {
         logf("Config    — WARNING: %s and %s share GPIO%d\n",
              names[i], names[j], pins[i]);
@@ -477,7 +490,7 @@ void saveConfig(const Config& c) {
   prefs.putInt("syslogPort",    c.syslogPort);
   prefs.putInt("moisturePin",   c.moisturePin);
   prefs.putInt("batteryPin",    c.batteryPin);
-  prefs.putInt("reedPin",       c.reedPin);
+  prefs.putInt("powerPin",      c.sensorPowerPin);
   prefs.putString("fwChannel",  c.fwChannel);
   prefs.putInt("firstBootMin",  c.firstBootDelayMin);
   prefs.putInt("sleepMin",      c.sleepMinutes);
@@ -634,7 +647,7 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
   h1{font-size:1.3em;color:#2c7a4b;margin-bottom:4px}
   p.sub{color:#666;font-size:.85em;margin-top:0}
   label{display:block;margin-top:14px;font-size:.9em;color:#333;font-weight:600}
-  input{width:100%;padding:8px;margin-top:4px;border:1px solid #ccc;
+  input,select{width:100%;padding:8px;margin-top:4px;border:1px solid #ccc;
     border-radius:6px;font-size:1em;box-sizing:border-box}
   .optional{color:#888;font-weight:400;font-size:.8em}
   .section{background:#fff;border-radius:10px;padding:16px;margin:16px 0;
@@ -774,11 +787,11 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
     <summary style="font-weight:600;font-size:.95em;color:#555;cursor:pointer;
       padding:10px 14px;background:#fff;border-radius:8px;
       box-shadow:0 1px 4px rgba(0,0,0,.08);list-style:none">
-      &#9654; Advanced — GPIO pin assignments
+      &#9654; Advanced Settings
     </summary>
     <div class="section" style="margin-top:0;border-top-left-radius:0;border-top-right-radius:0">
       <p class="hint" style="margin-top:0">Change only if your hardware uses different pins than the defaults.
-        All three pins must be different. Valid range: 0–10 (XIAO GPIO numbers).</p>
+        Valid range: 0–10 (XIAO GPIO numbers) or -1 for unassigned.</p>
       <label>Moisture sensor pin
         <input type="number" name="moisturePin" value="0" min="0" max="10">
       </label>
@@ -786,11 +799,17 @@ const char CONFIG_HTML[] PROGMEM = R"rawhtml(
       <label>Battery voltage pin
         <input type="number" name="batteryPin" value="1" min="0" max="10">
       </label>
-      <p class="hint">Default: 1 (A1/GPIO1)</p>
-      <label>Reed switch pin
-        <input type="number" name="reedPin" value="2" min="0" max="10">
+      <label>Sensor power pin
+        <input type="number" name="sensorPowerPin" value="-1" min="-1" max="10">
       </label>
-      <p class="hint">Default: 3 (D3/GPIO3)</p>
+      <p class="hint">Default: -1 (Disabled / Constant 3.3V rail)</p>
+      <label>Update channel
+        <select name="fwChannel">
+          <option value="stable">stable</option>
+          <option value="beta">beta</option>
+        </select>
+      </label>
+      <p class="hint">Default: stable (Select 'beta' for pre-releases)</p>
     </div>
   </details>
 
@@ -891,12 +910,14 @@ function validateForm(e) {
     return fail(e, 'Syslog port must be between 1 and 65535.');
   var mPin = parseInt(v('moisturePin'),10);
   var bPin = parseInt(v('batteryPin'),10);
-  var rPin = parseInt(v('reedPin'),10);
+  var pPin = parseInt(v('sensorPowerPin'),10);
   if (isNaN(mPin)||mPin<0||mPin>10) return fail(e, 'Moisture pin must be between 0 and 10.');
   if (isNaN(bPin)||bPin<0||bPin>10) return fail(e, 'Battery pin must be between 0 and 10.');
-  if (isNaN(rPin)||rPin<0||rPin>10) return fail(e, 'Reed switch pin must be between 0 and 10.');
-  if (mPin===bPin||mPin===rPin||bPin===rPin)
-    return fail(e, 'Moisture, battery and reed switch pins must all be different.');
+  if (isNaN(pPin)||pPin<-1||pPin>10) return fail(e, 'Sensor power pin must be between -1 and 10.');
+  if (mPin===bPin)
+    return fail(e, 'Moisture and battery pins must be different.');
+  if (pPin>=0 && (pPin===mPin||pPin===bPin))
+    return fail(e, 'Sensor power pin conflicts with another assigned pin.');
 }
 document.querySelector('form').addEventListener('submit', validateForm);
 </script>
@@ -1070,12 +1091,20 @@ static String validateSave() {
   // ── GPIO pin assignments ─────────────────────────────────
   int mPin = server.arg("moisturePin").toInt();
   int bPin = server.arg("batteryPin").toInt();
-  int rPin = server.arg("reedPin").toInt();
+  int pPin = server.arg("sensorPowerPin").toInt();
   if (mPin < 0 || mPin > 10) return "Moisture pin must be between 0 and 10.";
   if (bPin < 0 || bPin > 10) return "Battery pin must be between 0 and 10.";
-  if (rPin < 0 || rPin > 10) return "Reed switch pin must be between 0 and 10.";
-  if (mPin == bPin || mPin == rPin || bPin == rPin)
-    return "Moisture, battery and reed switch pins must all be different.";
+  if (pPin < -1 || pPin > 10) return "Sensor power pin must be between -1 and 10.";
+  if (mPin == bPin)
+    return "Moisture and battery pins must be different.";
+  if (pPin >= 0 && (pPin == mPin || pPin == bPin))
+    return "Sensor power pin conflicts with another assigned pin.";
+
+  // ── Update channel (optional) ───────────────────────────
+  String fwChannel = server.arg("fwChannel");
+  if (fwChannel.length() > 0 && fwChannel != "stable" && fwChannel != "beta") {
+    return "Update channel must be 'stable' or 'beta'.";
+  }
 
   return "";  // all good
 }
@@ -1102,7 +1131,18 @@ static void sendError(const String& reason) {
 // ═══════════════════════════════════════════════════════════
 
 void handleRoot() {
-  server.send_P(200, "text/html", CONFIG_HTML);
+  // Check if we are running a beta or dev build. If so, default the channel in the portal to "beta".
+  bool isBetaOrDev = (strchr(FIRMWARE_VERSION, '-') != NULL);
+  const char* defaultChannel = isBetaOrDev ? "beta" : "stable";
+
+  // Load CONFIG_HTML and pre-select the appropriate channel dropdown option
+  String html = String(CONFIG_HTML);
+  if (strcmp(defaultChannel, "beta") == 0) {
+    html.replace("<option value=\"beta\">beta</option>", "<option value=\"beta\" selected>beta</option>");
+  } else {
+    html.replace("<option value=\"stable\">stable</option>", "<option value=\"stable\" selected>stable</option>");
+  }
+  server.send(200, "text/html", html);
 }
 
 void handleSave() {
@@ -1148,7 +1188,12 @@ void handleSave() {
 
   c.moisturePin = server.arg("moisturePin").toInt();
   c.batteryPin  = server.arg("batteryPin").toInt();
-  c.reedPin     = server.arg("reedPin").toInt();
+  c.sensorPowerPin = server.arg("sensorPowerPin").toInt();
+
+  strlcpy(c.fwChannel, server.arg("fwChannel").c_str(), sizeof(c.fwChannel));
+  if (strlen(c.fwChannel) == 0) {
+    strlcpy(c.fwChannel, "stable", sizeof(c.fwChannel));
+  }
 
   // Preserve MQTT-only fields that have no portal form input.
   // Use the default when config was never loaded (fresh provision or post-wipe)
@@ -1267,10 +1312,10 @@ void checkForUpdate() {
     return;
   }
 
-  // 24h gate — bypass when forced.
+  // 24h gate — bypass when forced, on beta channel, or running a beta/dev build.
   // lastFotaCheck resets on hard reset/OTA restart so a check always happens
   // on first wake after a firmware change even without forcing.
-  if (!isForced && hasValidEpoch() && lastFotaCheck > 0
+  if (!isForced && !isBeta && !isDev && hasValidEpoch() && lastFotaCheck > 0
       && (time(nullptr) - lastFotaCheck) < 86400) {
     logf("FOTA      — skipped (checked %ldh ago)\n",
          (long)(time(nullptr) - lastFotaCheck) / 3600);
@@ -1357,6 +1402,19 @@ void checkForUpdate() {
   logf("FOTA      — local: %s  remote: %s\n",
        FIRMWARE_VERSION, remoteVersion.c_str());
 
+  // ── Rollback guard: skip a version previously flagged as bad ─────────────
+  {
+    Preferences fota;
+    fota.begin("fota", true);
+    char badVer[20];
+    fota.getString("badVer", badVer, sizeof(badVer));
+    fota.end();
+    if (strlen(badVer) > 0 && remoteVersion == String(badVer)) {
+      logf("FOTA      — blocked: %s marked bad after rollback, skipping\n", badVer);
+      return;
+    }
+  }
+
   // ── Decide whether to update ──────────────────────────────
   bool shouldUpdate = false;
   if (isBeta) {
@@ -1390,6 +1448,17 @@ void checkForUpdate() {
 
   logf("FOTA      — update available: %s -> %s, downloading...\n",
        FIRMWARE_VERSION, remoteVersion.c_str());
+
+  // Mark flash pending before writing — if the new firmware fails to confirm
+  // (FOTA_MAX_RETRIES boots without MQTT publish), rollback is triggered.
+  {
+    Preferences fota;
+    fota.begin("fota", false);
+    fota.putInt("flashPend", 1);
+    fota.putString("lastTgt", remoteVersion.c_str());
+    fota.putInt("fails", 0);
+    fota.end();
+  }
 
   // Fresh client for the binary download — longer timeout, CDN redirect
   // triggers a new TLS handshake so both timeouts must be updated.
@@ -1475,70 +1544,22 @@ void getTimestamp(char* buf, size_t len) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  REED SWITCH
-// ═══════════════════════════════════════════════════════════
 
-void checkReedSwitch() {
-  gpio_hold_dis((gpio_num_t)cfg.reedPin);
-  pinMode(cfg.reedPin, INPUT_PULLUP);
-  delay(50);
-
-  if (digitalRead(cfg.reedPin) == LOW) {
-    logf("Reed      — magnet detected, waiting to confirm...\n");
-    unsigned long holdStart  = millis();
-    bool          restartArmed = false;
-
-    while (digitalRead(cfg.reedPin) == LOW) {
-      unsigned long held = millis() - holdStart;
-
-      if (held >= REED_RESET_MS) {
-        logf("Reed      — 10s hold: wiping config, restarting into portal\n");
-        Serial.flush();
-        delay(200);
-        clearConfig();
-        ESP.restart();
-      }
-
-      if (!restartArmed && held >= REED_RESTART_MS) {
-        restartArmed = true;
-        logf("Reed      — 3s hold: release to restart, keep holding for 10s to wipe config\n");
-      }
-
-      delay(50);
-    }
-
-    if (restartArmed) {
-      logf("Reed      — released, restarting\n");
-      Serial.flush();
-      delay(200);
-      ESP.restart();
-    } else {
-      logf("Reed      — magnet removed early, ignoring\n");
-    }
-  }
-}
 
 // ═══════════════════════════════════════════════════════════
 //  SENSORS
 // ═══════════════════════════════════════════════════════════
 
 void goToSleep(int minutes) {
+  if (configLoaded && cfg.sensorPowerPin >= 0) {
+    digitalWrite(cfg.sensorPowerPin, LOW);
+    pinMode(cfg.sensorPowerPin, INPUT);
+    logf("Power     — sensorPowerPin GPIO%d set LOW & INPUT (tri-stated for deep sleep)\n", cfg.sensorPowerPin);
+  }
+
   logf("Sleep     — going to sleep for %d minutes\n", minutes);
 
-  // Enable GPIO wakeup so a magnet presentation wakes the device immediately.
-  // INPUT_PULLUP keeps the pin HIGH (reed open); closing to GND fires the wake.
-  // The pullup state is retained during deep sleep so no spurious wakeups occur.
-  pinMode(cfg.reedPin, INPUT_PULLUP);
-  
-  // Enable GPIO hold so that the pullup remains active even during deep sleep when
-  // peripheral power is lost.
-  gpio_hold_en((gpio_num_t)cfg.reedPin);
-#if !SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP
-  gpio_deep_sleep_hold_en();
-#endif
 
-  esp_deep_sleep_enable_gpio_wakeup(1ULL << cfg.reedPin, ESP_GPIO_WAKEUP_GPIO_LOW);
 
   Serial.flush();
   delay(50);  // allow last syslog UDP packet to transmit before radio shuts down
@@ -1547,7 +1568,18 @@ void goToSleep(int minutes) {
 }
 
 MoistureReading readMoisture() {
-  delay(500);
+  if (cfg.sensorPowerPin >= 0) {
+    // Wait only for the remaining fractional window of the 500ms stabilization period
+    unsigned long elapsed = millis() - sensorPowerOnTime;
+    if (elapsed < 500) {
+      delay(500 - elapsed);
+    }
+  } else {
+    // Running off the continuous rail; bypass 500ms startup delay and use a small
+    // 200ms window to let the ESP32's ADC internal reference stabilize, saving wake-time.
+    delay(200);
+  }
+
   long sum = 0;
   for (int i = 0; i < 10; i++) {
     sum += analogReadMilliVolts(cfg.moisturePin);
@@ -1694,6 +1726,7 @@ static char pendingSyslogHost[64]    = "";
 static char pendingSyslogPort[8]     = "";
 static char pendingMoisturePin[4]    = "";
 static char pendingBatteryPin[4]     = "";
+static char pendingSensorPowerPin[4] = "";
 static char pendingStaticIP[8]       = "";  // "true" or "false"
 static char pendingIP[16]            = "";
 static char pendingGW[16]            = "";
@@ -1719,6 +1752,7 @@ static uint32_t pendingFields        = 0;   // bitmask — which fields arrived 
 #define PF_FW_CHANNEL          (1<<14)
 #define PF_FIRST_BOOT_DELAY    (1<<15)
 #define PF_SLEEP_MINUTES       (1<<16)
+#define PF_SENSOR_POWER_PIN    (1<<17)
 
 // ── IMPORTANT: callback safety rules ────────────────────────
 // PubSubClient passes topic and payload as pointers INTO its internal buffer.
@@ -1785,6 +1819,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     else if (strcmp(fieldName, "syslogPort")   == 0) { strlcpy(pendingSyslogPort,   val, sizeof(pendingSyslogPort));   pendingFields |= PF_SYSLOG_PORT;   }
     else if (strcmp(fieldName, "moisturePin")  == 0) { strlcpy(pendingMoisturePin,  val, sizeof(pendingMoisturePin));  pendingFields |= PF_MOISTURE_PIN;  }
     else if (strcmp(fieldName, "batteryPin")   == 0) { strlcpy(pendingBatteryPin,   val, sizeof(pendingBatteryPin));   pendingFields |= PF_BATTERY_PIN;   }
+    else if (strcmp(fieldName, "sensorPowerPin") == 0) { strlcpy(pendingSensorPowerPin, val, sizeof(pendingSensorPowerPin)); pendingFields |= PF_SENSOR_POWER_PIN; }
     else if (strcmp(fieldName, "staticIP")    == 0) { strlcpy(pendingStaticIP,    val, sizeof(pendingStaticIP));    pendingFields |= PF_STATIC_IP;    }
     else if (strcmp(fieldName, "ip")          == 0) { strlcpy(pendingIP,          val, sizeof(pendingIP));          pendingFields |= PF_IP;           }
     else if (strcmp(fieldName, "gw")          == 0) { strlcpy(pendingGW,          val, sizeof(pendingGW));          pendingFields |= PF_GW;           }
@@ -1930,35 +1965,31 @@ void publishDiscovery() {
   char payload[640];
   char topic[128];
 
-  // ── Moisture ─────────────────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/sensor/%s_moisture/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Moisture\",\"unique_id\":\"%s_moisture\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.moisture }}\","
-      "\"unit_of_measurement\":\"%%\",\"device_class\":\"moisture\","
-      "\"state_class\":\"measurement\",\"icon\":\"mdi:water-percent\",%s}",
-      SENSOR_ID, STATE_TOPIC, device));
+  // ── Sensor Entities ──────────────────────────────────────
+  struct SensorEntity {
+    const char* name;
+    const char* suffix;
+    const char* key;
+    const char* extra;
+  };
 
-  // ── Battery Voltage ──────────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/sensor/%s_battery_v/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Battery Voltage\",\"unique_id\":\"%s_battery_v\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.battery_v }}\","
-      "\"unit_of_measurement\":\"V\",\"device_class\":\"voltage\","
-      "\"state_class\":\"measurement\",\"icon\":\"mdi:battery\",%s}",
-      SENSOR_ID, STATE_TOPIC, device));
+  const SensorEntity sensors[] = {
+    { "Moisture",         "moisture",    "moisture",   "\"unit_of_measurement\":\"%%\",\"device_class\":\"moisture\",\"state_class\":\"measurement\",\"icon\":\"mdi:water-percent\"" },
+    { "Battery Voltage",  "battery_v",   "battery_v",  "\"unit_of_measurement\":\"V\",\"device_class\":\"voltage\",\"state_class\":\"measurement\",\"icon\":\"mdi:battery\"" },
+    { "Battery",          "battery_pct", "battery_pct", "\"unit_of_measurement\":\"%%\",\"device_class\":\"battery\",\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\"" },
+    { "Last Seen",        "ts",          "ts",         "\"device_class\":\"timestamp\",\"icon\":\"mdi:clock-outline\"" },
+    { "Firmware Version", "fw",          "fw_version", "\"icon\":\"mdi:chip\"" },
+    { "RSSI",             "rssi",        "rssi",       "\"device_class\":\"signal_strength\",\"unit_of_measurement\":\"dBm\",\"state_class\":\"measurement\",\"icon\":\"mdi:wifi\"" }
+  };
 
-  // ── Battery ──────────────────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/sensor/%s_battery_pct/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Battery\",\"unique_id\":\"%s_battery_pct\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.battery_pct }}\","
-      "\"unit_of_measurement\":\"%%\",\"device_class\":\"battery\","
-      "\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\",%s}",
-      SENSOR_ID, STATE_TOPIC, device));
+  for (auto& s : sensors) {
+    snprintf(topic, sizeof(topic), "%s/sensor/%s_%s/config", HA_DISCOVERY_PREFIX, SENSOR_ID, s.suffix);
+    publishMqttEntity(topic, payload, sizeof(payload),
+      snprintf(payload, sizeof(payload),
+        "{\"name\":\"%s\",\"unique_id\":\"%s_%s\","
+        "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.%s }}\",%s,%s}",
+        s.name, SENSOR_ID, s.suffix, STATE_TOPIC, s.key, s.extra, device));
+  }
 
   // ── Binary sensor: Low Battery ───────────────────────────
   // Uses the existing state topic — no extra publish needed.
@@ -1974,36 +2005,6 @@ void publishDiscovery() {
       "\"device_class\":\"battery\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\","
       "\"icon\":\"mdi:battery-alert\",%s}",
       SENSOR_ID, STATE_TOPIC, LOW_BATTERY_PCT, device));
-
-  // ── Last Seen ────────────────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/sensor/%s_ts/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Last Seen\",\"unique_id\":\"%s_ts\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.ts }}\","
-      "\"device_class\":\"timestamp\","
-      "\"icon\":\"mdi:clock-outline\",%s}",
-      SENSOR_ID, STATE_TOPIC, device));
-
-  // ── Firmware Version ─────────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/sensor/%s_fw/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Firmware Version\",\"unique_id\":\"%s_fw\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.fw_version }}\","
-      "\"icon\":\"mdi:chip\",%s}",
-      SENSOR_ID, STATE_TOPIC, device));
-
-  // ── RSSI ─────────────────────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/sensor/%s_rssi/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"RSSI\",\"unique_id\":\"%s_rssi\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.rssi }}\","
-      "\"device_class\":\"signal_strength\",\"unit_of_measurement\":\"dBm\","
-      "\"state_class\":\"measurement\","
-      "\"icon\":\"mdi:wifi\",%s}",
-      SENSOR_ID, STATE_TOPIC, device));
 
   // ── Button: Reset Config ─────────────────────────────────
   // Publishes a retained "reset" to CMD_TOPIC when pressed in HA.
@@ -2067,13 +2068,13 @@ void publishConfigState() {
     "{\"mqttBroker\":\"%s\",\"mqttPort\":%d,"
     "\"mqttUser\":\"%s\",\"mqttPassword\":\"***\","
     "\"syslogHost\":\"%s\",\"syslogPort\":%d,"
-    "\"moisturePin\":%d,\"batteryPin\":%d,\"reedPin\":%d,"
+    "\"moisturePin\":%d,\"batteryPin\":%d,\"sensorPowerPin\":%d,"
     "\"staticIP\":%s,\"ip\":\"%s\",\"gw\":\"%s\",\"sn\":\"%s\",\"dns\":\"%s\","
     "\"fwChannel\":\"%s\",\"firstBootDelayMin\":%d,\"sleepMinutes\":%d}",
     cfg.mqttBroker, cfg.mqttPort,
     cfg.mqttUser,
     cfg.syslogHost, cfg.syslogPort,
-    cfg.moisturePin, cfg.batteryPin, cfg.reedPin,
+    cfg.moisturePin, cfg.batteryPin, cfg.sensorPowerPin,
     cfg.staticIP ? "true" : "false", ipStr, gwStr, snStr, dnsStr,
     cfg.fwChannel, cfg.firstBootDelayMin, cfg.sleepMinutes);
   mqtt.publish(CONFIG_STATE_TOPIC, payload, true);
@@ -2093,22 +2094,36 @@ void applyConfigChange() {
   // value) is correct: a bad value should not keep retrying every wake cycle.
   {
     char t[96];
-    if (pendingFields & PF_MQTT_BROKER)   { snprintf(t, sizeof(t), "%s/mqttBroker",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_MQTT_PORT)     { snprintf(t, sizeof(t), "%s/mqttPort",     CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_MQTT_USER)     { snprintf(t, sizeof(t), "%s/mqttUser",     CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_MQTT_PASSWORD) { snprintf(t, sizeof(t), "%s/mqttPassword", CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_SYSLOG_HOST)   { snprintf(t, sizeof(t), "%s/syslogHost",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_SYSLOG_PORT)   { snprintf(t, sizeof(t), "%s/syslogPort",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_MOISTURE_PIN)  { snprintf(t, sizeof(t), "%s/moisturePin",  CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_BATTERY_PIN)   { snprintf(t, sizeof(t), "%s/batteryPin",   CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_STATIC_IP)   { snprintf(t, sizeof(t), "%s/staticIP",    CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_IP)          { snprintf(t, sizeof(t), "%s/ip",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_GW)          { snprintf(t, sizeof(t), "%s/gw",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_SN)          { snprintf(t, sizeof(t), "%s/sn",          CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_DNS)         { snprintf(t, sizeof(t), "%s/dns",         CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_FW_CHANNEL)         { snprintf(t, sizeof(t), "%s/fwChannel",        CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_FIRST_BOOT_DELAY)   { snprintf(t, sizeof(t), "%s/firstBootDelayMin", CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
-    if (pendingFields & PF_SLEEP_MINUTES)       { snprintf(t, sizeof(t), "%s/sleepMinutes",      CONFIG_SET_PREFIX); mqtt.publish(t, "", true); mqtt.loop(); }
+    struct ClearItem {
+      uint32_t mask;
+      const char* subtopic;
+    };
+    const ClearItem clearItems[] = {
+      { PF_MQTT_BROKER,      "mqttBroker" },
+      { PF_MQTT_PORT,        "mqttPort" },
+      { PF_MQTT_USER,        "mqttUser" },
+      { PF_MQTT_PASSWORD,    "mqttPassword" },
+      { PF_SYSLOG_HOST,      "syslogHost" },
+      { PF_SYSLOG_PORT,      "syslogPort" },
+      { PF_MOISTURE_PIN,     "moisturePin" },
+      { PF_BATTERY_PIN,      "batteryPin" },
+      { PF_SENSOR_POWER_PIN, "sensorPowerPin" },
+      { PF_STATIC_IP,        "staticIP" },
+      { PF_IP,               "ip" },
+      { PF_GW,               "gw" },
+      { PF_SN,               "sn" },
+      { PF_DNS,              "dns" },
+      { PF_FW_CHANNEL,       "fwChannel" },
+      { PF_FIRST_BOOT_DELAY, "firstBootDelayMin" },
+      { PF_SLEEP_MINUTES,    "sleepMinutes" }
+    };
+    for (auto& item : clearItems) {
+      if (pendingFields & item.mask) {
+        snprintf(t, sizeof(t), "%s/%s", CONFIG_SET_PREFIX, item.subtopic);
+        mqtt.publish(t, "", true);
+        mqtt.loop();
+      }
+    }
   }
 
   bool changed = false;
@@ -2156,15 +2171,22 @@ void applyConfigChange() {
   if (pendingFields & PF_MOISTURE_PIN) {
     int p = atoi(pendingMoisturePin);
     if (p < 0 || p > 10) { logf("Config    — moisturePin rejected: must be 0-10\n"); }
-    else if (p == cfg.batteryPin || p == cfg.reedPin) { logf("Config    — moisturePin rejected: conflicts with another pin\n"); }
+    else if (p == cfg.batteryPin || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — moisturePin rejected: conflicts with another pin\n"); }
     else { cfg.moisturePin = p; logf("Config    — moisturePin -> %d\n", p); changed = true; }
   }
 
   if (pendingFields & PF_BATTERY_PIN) {
     int p = atoi(pendingBatteryPin);
     if (p < 0 || p > 10) { logf("Config    — batteryPin rejected: must be 0-10\n"); }
-    else if (p == cfg.moisturePin || p == cfg.reedPin) { logf("Config    — batteryPin rejected: conflicts with another pin\n"); }
+    else if (p == cfg.moisturePin || (cfg.sensorPowerPin >= 0 && p == cfg.sensorPowerPin)) { logf("Config    — batteryPin rejected: conflicts with another pin\n"); }
     else { cfg.batteryPin = p; logf("Config    — batteryPin -> %d\n", p); changed = true; }
+  }
+
+  if (pendingFields & PF_SENSOR_POWER_PIN) {
+    int p = atoi(pendingSensorPowerPin);
+    if (p < -1 || p > 10) { logf("Config    — sensorPowerPin rejected: must be -1 to 10\n"); }
+    else if (p >= 0 && (p == cfg.moisturePin || p == cfg.batteryPin)) { logf("Config    — sensorPowerPin rejected: conflicts with another pin\n"); }
+    else { cfg.sensorPowerPin = p; logf("Config    — sensorPowerPin -> %d\n", p); changed = true; }
   }
 
   if (pendingFields & PF_STATIC_IP) {
@@ -2238,85 +2260,45 @@ void publishConfigDiscovery() {
   // command as retained so sleeping sensors receive it on their next wake.
   // No command_template needed — HA sends the raw field value directly.
 
-  // ── Text: MQTT Broker ────────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/text/%s_cfg_mqtt_broker/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"MQTT Broker\",\"unique_id\":\"%s_cfg_mqtt_broker\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttBroker }}\","
-      "\"command_topic\":\"%s/mqttBroker\",\"retain\":true,\"max\":63,%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+  struct ConfigEntity {
+    const char* component;  // "text", "number", "select"
+    const char* name;
+    const char* uid;
+    const char* key;
+    const char* extra;
+  };
 
-  // ── Number: MQTT Port ────────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_mqtt_port/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"MQTT Port\",\"unique_id\":\"%s_cfg_mqtt_port\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPort }}\","
-      "\"command_topic\":\"%s/mqttPort\",\"retain\":true,"
-      "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+  const ConfigEntity configEntities[] = {
+    { "text",   "MQTT Broker",       "cfg_mqtt_broker",        "mqttBroker",        "\"max\":63" },
+    { "number", "MQTT Port",         "cfg_mqtt_port",          "mqttPort",          "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\"" },
+    { "text",   "MQTT Username",     "cfg_mqtt_user",          "mqttUser",          "\"max\":31" },
+    { "text",   "MQTT Password",     "cfg_mqtt_pass",          "mqttPassword",      "\"max\":63" },
+    { "text",   "Syslog Host",       "cfg_syslog_host",        "syslogHost",        "\"max\":63" },
+    { "number", "Syslog Port",       "cfg_syslog_port",        "syslogPort",        "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\"" },
+    { "number", "Moisture Pin",      "cfg_moisture_pin",       "moisturePin",       "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:water-percent\"" },
+    { "number", "Battery Pin",       "cfg_battery_pin",        "batteryPin",        "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:battery\"" },
+    { "number", "Sensor Power Pin",  "cfg_sensor_power_pin",   "sensorPowerPin",    "\"min\":-1,\"max\":10,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:power\"" },
+    { "text",   "IP Address",        "cfg_ip",                 "ip",                "\"max\":15,\"entity_category\":\"config\"" },
+    { "text",   "Gateway",           "cfg_gw",                 "gw",                "\"max\":15,\"entity_category\":\"config\"" },
+    { "text",   "Subnet Mask",       "cfg_sn",                 "sn",                "\"max\":15,\"entity_category\":\"config\"" },
+    { "text",   "DNS Server",        "cfg_dns",                "dns",               "\"max\":15,\"entity_category\":\"config\"" },
+    { "number", "First Boot Delay",  "cfg_first_boot_delay",   "firstBootDelayMin", "\"min\":0,\"max\":120,\"step\":1,\"mode\":\"box\",\"unit_of_measurement\":\"min\",\"icon\":\"mdi:timer\"" },
+    { "number", "Sleep Interval",    "cfg_sleep_minutes",      "sleepMinutes",      "\"min\":1,\"max\":720,\"step\":1,\"mode\":\"box\",\"unit_of_measurement\":\"min\",\"icon\":\"mdi:sleep\"" },
+    { "select", "Update Channel",    "cfg_fw_channel",         "fwChannel",         "\"options\":[\"stable\",\"beta\"],\"entity_category\":\"config\",\"icon\":\"mdi:update\"" }
+  };
 
-  // ── Text: MQTT Username ──────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/text/%s_cfg_mqtt_user/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"MQTT Username\",\"unique_id\":\"%s_cfg_mqtt_user\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttUser }}\","
-      "\"command_topic\":\"%s/mqttUser\",\"retain\":true,\"max\":31,%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
-
-  // ── Text: MQTT Password ──────────────────────────────────
-  // Note: state_topic publishes "***" for the password — this entity is
-  // write-only from HA's perspective; the current value is never displayed.
-  snprintf(topic, sizeof(topic), "%s/text/%s_cfg_mqtt_pass/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"MQTT Password\",\"unique_id\":\"%s_cfg_mqtt_pass\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.mqttPassword }}\","
-      "\"command_topic\":\"%s/mqttPassword\",\"retain\":true,\"max\":63,%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
-
-  // ── Text: Syslog Host ────────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/text/%s_cfg_syslog_host/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Syslog Host\",\"unique_id\":\"%s_cfg_syslog_host\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogHost }}\","
-      "\"command_topic\":\"%s/syslogHost\",\"retain\":true,\"max\":63,%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
-
-  // ── Number: Syslog Port ──────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_syslog_port/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Syslog Port\",\"unique_id\":\"%s_cfg_syslog_port\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.syslogPort }}\","
-      "\"command_topic\":\"%s/syslogPort\",\"retain\":true,"
-      "\"min\":1,\"max\":65535,\"step\":1,\"mode\":\"box\",%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
-
-  // ── Number: Moisture Pin ─────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_moisture_pin/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Moisture Pin\",\"unique_id\":\"%s_cfg_moisture_pin\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.moisturePin }}\","
-      "\"command_topic\":\"%s/moisturePin\",\"retain\":true,"
-      "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
-      "\"icon\":\"mdi:water-percent\",%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
-
-  // ── Number: Battery Pin ──────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_battery_pin/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Battery Pin\",\"unique_id\":\"%s_cfg_battery_pin\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.batteryPin }}\","
-      "\"command_topic\":\"%s/batteryPin\",\"retain\":true,"
-      "\"min\":0,\"max\":10,\"step\":1,\"mode\":\"box\","
-      "\"icon\":\"mdi:battery\",%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+  for (auto& c : configEntities) {
+    snprintf(topic, sizeof(topic), "%s/%s/%s_%s/config", HA_DISCOVERY_PREFIX, c.component, SENSOR_ID, c.uid);
+    publishMqttEntity(topic, payload, sizeof(payload),
+      snprintf(payload, sizeof(payload),
+        "{\"name\":\"%s\",\"unique_id\":\"%s_%s\","
+        "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.%s }}\","
+        "\"command_topic\":\"%s/%s\",\"retain\":true,%s,%s}",
+        c.name, SENSOR_ID, c.uid,
+        CONFIG_STATE_TOPIC, c.key,
+        CONFIG_SET_PREFIX, c.key,
+        c.extra, device));
+  }
 
   // ── Switch: Static IP ────────────────────────────────────
   // payload_on/off are the raw values sent to the per-field subtopic
@@ -2331,68 +2313,73 @@ void publishConfigDiscovery() {
       "\"entity_category\":\"config\",%s}",
       SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
 
-  // ── Text: IP, Gateway, Subnet Mask, DNS ──────────────────
-  const struct { const char* name; const char* uid; const char* key; } netFields[] = {
-    { "IP Address",  "cfg_ip",  "ip"  },
-    { "Gateway",     "cfg_gw",  "gw"  },
-    { "Subnet Mask", "cfg_sn",  "sn"  },
-    { "DNS Server",  "cfg_dns", "dns" },
-  };
-  for (auto& f : netFields) {
-    snprintf(topic, sizeof(topic), "%s/text/%s_%s/config", HA_DISCOVERY_PREFIX, SENSOR_ID, f.uid);
-    publishMqttEntity(topic, payload, sizeof(payload),
-      snprintf(payload, sizeof(payload),
-        "{\"name\":\"%s\",\"unique_id\":\"%s_%s\","
-        "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.%s }}\","
-        "\"command_topic\":\"%s/%s\",\"retain\":true,\"max\":15,"
-        "\"entity_category\":\"config\",%s}",
-        f.name, SENSOR_ID, f.uid,
-        CONFIG_STATE_TOPIC, f.key,
-        CONFIG_SET_PREFIX, f.key,
-        device));
+  logf("MQTT      — HA discovery published\n");
+}
+
+// ═══════════════════════════════════════════════════════════
+//  FOTA BOOT HEALTH / ROLLBACK GUARD
+// ═══════════════════════════════════════════════════════════
+
+// Called once per boot after loadConfig(). Tracks consecutive failed boots
+// after a FOTA flash and rolls back to the previous OTA partition when the
+// failure count reaches FOTA_MAX_RETRIES. A "ROLLED BACK" syslog line is
+// emitted on the first healthy wake of the recovered firmware so Grafana can
+// alert on it via: {job="syslog"} |= `FOTA      — ROLLED BACK`
+void checkFotaBootHealth() {
+  Preferences fota;
+  fota.begin("fota", false);
+
+  // Announce rollback if the previous boot triggered one
+  char rollbackFrom[20];
+  fota.getString("rollbackFrom", rollbackFrom, sizeof(rollbackFrom));
+  if (strlen(rollbackFrom) > 0) {
+    logf("FOTA      — ROLLED BACK: rejected %s after %d failed boots, running %s\n",
+         rollbackFrom, FOTA_MAX_RETRIES, FIRMWARE_VERSION);
+    fota.putString("rollbackFrom", "");
   }
 
-  // ── Number: First Boot Delay ─────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_first_boot_delay/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"First Boot Delay\",\"unique_id\":\"%s_cfg_first_boot_delay\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.firstBootDelayMin }}\","
-      "\"command_topic\":\"%s/firstBootDelayMin\",\"retain\":true,"
-      "\"min\":0,\"max\":120,\"step\":1,\"mode\":\"box\","
-      "\"unit_of_measurement\":\"min\","
-      "\"icon\":\"mdi:timer\",%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+  int pend = fota.getInt("flashPend", 0);
+  if (!pend) { fota.end(); return; }
 
-  // ── Number: Sleep Interval ────────────────────────────────
-  snprintf(topic, sizeof(topic), "%s/number/%s_cfg_sleep_minutes/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Sleep Interval\",\"unique_id\":\"%s_cfg_sleep_minutes\","
-      "\"state_topic\":\"%s\",\"value_template\":\"{{ value_json.sleepMinutes }}\","
-      "\"command_topic\":\"%s/sleepMinutes\",\"retain\":true,"
-      "\"min\":1,\"max\":720,\"step\":1,\"mode\":\"box\","
-      "\"unit_of_measurement\":\"min\","
-      "\"icon\":\"mdi:sleep\",%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+  char lastTgt[20];
+  fota.getString("lastTgt", lastTgt, sizeof(lastTgt));
+  int fails = fota.getInt("fails", 0) + 1;
 
-  // ── Select: Update Channel ───────────────────────────────
-  // Options: "stable" (default) or "beta". Retained so sleeping sensors
-  // pick up the change on next wake; HA select reflects current state via
-  // config/state topic.
-  snprintf(topic, sizeof(topic), "%s/select/%s_cfg_fw_channel/config", HA_DISCOVERY_PREFIX, SENSOR_ID);
-  publishMqttEntity(topic, payload, sizeof(payload),
-    snprintf(payload, sizeof(payload),
-      "{\"name\":\"Update Channel\",\"unique_id\":\"%s_cfg_fw_channel\","
-      "\"state_topic\":\"%s\","
-      "\"value_template\":\"{{ value_json.fwChannel }}\","
-      "\"command_topic\":\"%s/fwChannel\",\"retain\":true,"
-      "\"options\":[\"stable\",\"beta\"],"
-      "\"entity_category\":\"config\","
-      "\"icon\":\"mdi:update\",%s}",
-      SENSOR_ID, CONFIG_STATE_TOPIC, CONFIG_SET_PREFIX, device));
+  if (fails < FOTA_MAX_RETRIES) {
+    fota.putInt("fails", fails);
+    fota.end();
+    logf("FOTA      — pending confirmation for %s, boot %d/%d\n",
+         lastTgt, fails, FOTA_MAX_RETRIES);
+    return;
+  }
 
-  logf("MQTT      — HA discovery published\n");
+  logf("FOTA      — ROLLBACK: %d failed boots on %s, reverting...\n",
+       fails, lastTgt);
+
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  const esp_partition_t* ota0    = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+  const esp_partition_t* ota1    = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
+  const esp_partition_t* prev    = (running == ota0) ? ota1 : ota0;
+
+  esp_app_desc_t desc;
+  if (prev && esp_ota_get_partition_description(prev, &desc) == ESP_OK) {
+    fota.putString("rollbackFrom", lastTgt);
+    fota.putString("badVer",       lastTgt);
+    fota.putInt("flashPend", 0);
+    fota.putInt("fails",     0);
+    fota.end();
+    esp_ota_set_boot_partition(prev);
+    esp_restart();
+  } else {
+    logf("FOTA      — ROLLBACK FAILED: no valid previous partition, stuck on %s\n",
+         lastTgt);
+    fota.putString("badVer", lastTgt);
+    fota.putInt("flashPend", 0);
+    fota.putInt("fails",     0);
+    fota.end();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2410,6 +2397,15 @@ void setup() {
   // ── Load config first so syslog server address is available ──
   loadConfig();
   validateConfig();
+  checkFotaBootHealth();
+
+  // ── Early sensor power-on for parallel stabilization ──
+  if (configLoaded && cfg.sensorPowerPin >= 0) {
+    pinMode(cfg.sensorPowerPin, OUTPUT);
+    digitalWrite(cfg.sensorPowerPin, HIGH);
+    sensorPowerOnTime = millis();
+    logf("Power     — sensorPowerPin GPIO%d set HIGH (stabilizing in parallel)\n", cfg.sensorPowerPin);
+  }
 
   // ── Wake / reset reason ───────────────────────────────────
   esp_reset_reason_t resetReason = esp_reset_reason();
@@ -2431,16 +2427,13 @@ void setup() {
       logf("Wake      — timer\n");
       break;
     case ESP_SLEEP_WAKEUP_GPIO:
-      logf("Wake      — GPIO (reed switch)\n");
+      logf("Wake      — GPIO\n");
       break;
     default:
       logf("Wake      — cold boot or unexpected (cause=%d)\n",
            (int)esp_sleep_get_wakeup_cause());
       break;
   }
-
-  // ── Reed switch check ─────────────────────────────────────
-  checkReedSwitch();
 
   // ── Boot button check — hold for 3s to force reconfiguration ──
   pinMode(BTN_BOOT, INPUT_PULLUP);
@@ -2550,6 +2543,18 @@ void setup() {
     SENSOR_ID, moisturePart, batteryPart, batRawMv, WiFi.RSSI(), FIRMWARE_VERSION, timestamp);
   bool ok = mqtt.publish(STATE_TOPIC, payload, true);
   logf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
+
+  // Confirm firmware good on first successful publish after a FOTA flash
+  if (ok) {
+    Preferences fota;
+    fota.begin("fota", false);
+    if (fota.getInt("flashPend", 0)) {
+      fota.putInt("flashPend", 0);
+      fota.putInt("fails",     0);
+      logf("FOTA      — %s confirmed good\n", FIRMWARE_VERSION);
+    }
+    fota.end();
+  }
 
   // ── Listen for incoming commands ────────────────────────
   logf("MQTT      — listening for commands...\n");
