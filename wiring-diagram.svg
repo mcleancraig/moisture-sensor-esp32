@@ -1,6 +1,6 @@
 <svg width="100%" viewBox="0 0 720 670" xmlns="http://www.w3.org/2000/svg" role="img">
-  <title>Garden Soil Moisture Sensor — Production Wiring Diagram</title>
-  <desc>XIAO ESP32-C6 wiring: A0/A1 left-top, GND/3V3 right-top, BAT pads underside centre. HW-390, 18650 direct to BAT pads (no diode), 2x200kOhm voltage divider. Reed switch (NO) on D3/GPIO3: hold 3s=restart, hold 10s=wipe config. Note: no reverse polarity protection fitted.</desc>
+  <title>Garden Soil Moisture Sensor — Wiring Diagram</title>
+  <desc>XIAO ESP32-C6 wiring: A0/A1 left-top, GND/3V3 right-top, BAT pads underside centre. HW-390, 18650 direct to BAT pads (no diode), 2x200kOhm voltage divider. Reed switch (NO) on D3/GPIO3: hold 3s=restart, hold 10s=wipe config. HW-390 VCC wired to D4/GPIO4 for power-gated operation (sensorPowerPin); see README for constant-power 3V3 alternative. Note: no reverse polarity protection fitted.</desc>
 
   <!-- ═══ XIAO ESP32-C6 board ═══
        USB-C at TOP.
@@ -27,8 +27,8 @@
   <line x1="280" y1="262" x2="270" y2="262" stroke="#888780" stroke-width="0.5"/>
   <text x="267" y="262" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D2</text>
   <line x1="280" y1="298" x2="150" y2="298" stroke="#0369A1" stroke-width="1.5"/>
-  <line x1="280" y1="334" x2="270" y2="334" stroke="#888780" stroke-width="0.5"/>
-  <text x="267" y="334" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D4</text>
+  <line x1="280" y1="334" x2="260" y2="334" stroke="#1D9E75" stroke-width="1.2"/>
+  <text x="257" y="334" text-anchor="end" font-family="sans-serif" font-size="8" fill="#1D9E75" dominant-baseline="central">D4 (GPIO4)</text>
   <line x1="280" y1="370" x2="270" y2="370" stroke="#888780" stroke-width="0.5"/>
   <text x="267" y="370" text-anchor="end" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D5</text>
   <line x1="280" y1="406" x2="270" y2="406" stroke="#888780" stroke-width="0.5"/>
@@ -54,8 +54,8 @@
   <text x="453" y="406" font-family="sans-serif" font-size="8" fill="#888780" dominant-baseline="central">D7/RX</text>
 
   <!-- Board notes -->
-  <text x="360" y="432" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#534AB7">deep sleep 15 min</text>
-  <text x="360" y="444" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#534AB7">OTA 5s on each wake</text>
+  <text x="360" y="432" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#534AB7">deep sleep 120 min (default)</text>
+  <text x="360" y="444" text-anchor="middle" font-family="sans-serif" font-size="8" fill="#534AB7">FOTA check on each wake</text>
 
   <!-- BAT pads callout -->
   <rect x="306" y="474" width="108" height="22" rx="4" fill="none" stroke="#1D9E75" stroke-width="1"/>
@@ -136,8 +136,8 @@
   <line x1="180" y1="476" x2="200" y2="476" stroke="#BA7517" stroke-width="1.2"/>
   <text x="204" y="476" font-family="sans-serif" font-size="9" fill="#BA7517" dominant-baseline="central">AOUT</text>
 
-  <!-- Sensor VCC → XIAO 3V3 (right side y=262, outside right via bottom) -->
-  <path d="M200 440 L216 440 L216 556 L530 556 L530 262 L460 262" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
+  <!-- Sensor VCC → XIAO D4 (power-gated); wire to 3V3 instead for constant power -->
+  <path d="M200 440 L200 334 L260 334" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
 
   <!-- Sensor GND → GND rail -->
   <path d="M200 458 L210 458 L210 510 L190 510" fill="none" stroke="#888780" stroke-width="1.5"/>
