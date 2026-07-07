@@ -9,6 +9,8 @@
 #include <time.h>
 #include "esp_mac.h"
 #include "esp_sleep.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include <esp_crt_bundle.h>
 #include <driver/gpio.h>
 
@@ -258,6 +260,7 @@ const int WIFI_TIMEOUT_MS    = 10000;  // max time waiting for WiFi association
 const int MQTT_TIMEOUT_S     =     5;  // TCP socket timeout per connect attempt
 const int FOTA_VERSION_TIMEOUT_MS = 8000;   // version.txt HTTP fetch
 const int FOTA_DL_TIMEOUT_MS      = 60000;  // firmware.bin download (large file)
+const int FOTA_MAX_RETRIES        = 3;      // failed boots before rollback
 
 // ── Thresholds ────────────────────────────────────────────
 #define LOW_BATTERY_PCT 15   // battery_pct at which low-battery alert fires
@@ -1399,6 +1402,19 @@ void checkForUpdate() {
   logf("FOTA      — local: %s  remote: %s\n",
        FIRMWARE_VERSION, remoteVersion.c_str());
 
+  // ── Rollback guard: skip a version previously flagged as bad ─────────────
+  {
+    Preferences fota;
+    fota.begin("fota", true);
+    char badVer[20];
+    fota.getString("badVer", badVer, sizeof(badVer));
+    fota.end();
+    if (strlen(badVer) > 0 && remoteVersion == String(badVer)) {
+      logf("FOTA      — blocked: %s marked bad after rollback, skipping\n", badVer);
+      return;
+    }
+  }
+
   // ── Decide whether to update ──────────────────────────────
   bool shouldUpdate = false;
   if (isBeta) {
@@ -1432,6 +1448,17 @@ void checkForUpdate() {
 
   logf("FOTA      — update available: %s -> %s, downloading...\n",
        FIRMWARE_VERSION, remoteVersion.c_str());
+
+  // Mark flash pending before writing — if the new firmware fails to confirm
+  // (FOTA_MAX_RETRIES boots without MQTT publish), rollback is triggered.
+  {
+    Preferences fota;
+    fota.begin("fota", false);
+    fota.putInt("flashPend", 1);
+    fota.putString("lastTgt", remoteVersion.c_str());
+    fota.putInt("fails", 0);
+    fota.end();
+  }
 
   // Fresh client for the binary download — longer timeout, CDN redirect
   // triggers a new TLS handshake so both timeouts must be updated.
@@ -2290,6 +2317,72 @@ void publishConfigDiscovery() {
 }
 
 // ═══════════════════════════════════════════════════════════
+//  FOTA BOOT HEALTH / ROLLBACK GUARD
+// ═══════════════════════════════════════════════════════════
+
+// Called once per boot after loadConfig(). Tracks consecutive failed boots
+// after a FOTA flash and rolls back to the previous OTA partition when the
+// failure count reaches FOTA_MAX_RETRIES. A "ROLLED BACK" syslog line is
+// emitted on the first healthy wake of the recovered firmware so Grafana can
+// alert on it via: {job="syslog"} |= `FOTA      — ROLLED BACK`
+void checkFotaBootHealth() {
+  Preferences fota;
+  fota.begin("fota", false);
+
+  // Announce rollback if the previous boot triggered one
+  char rollbackFrom[20];
+  fota.getString("rollbackFrom", rollbackFrom, sizeof(rollbackFrom));
+  if (strlen(rollbackFrom) > 0) {
+    logf("FOTA      — ROLLED BACK: rejected %s after %d failed boots, running %s\n",
+         rollbackFrom, FOTA_MAX_RETRIES, FIRMWARE_VERSION);
+    fota.putString("rollbackFrom", "");
+  }
+
+  int pend = fota.getInt("flashPend", 0);
+  if (!pend) { fota.end(); return; }
+
+  char lastTgt[20];
+  fota.getString("lastTgt", lastTgt, sizeof(lastTgt));
+  int fails = fota.getInt("fails", 0) + 1;
+
+  if (fails < FOTA_MAX_RETRIES) {
+    fota.putInt("fails", fails);
+    fota.end();
+    logf("FOTA      — pending confirmation for %s, boot %d/%d\n",
+         lastTgt, fails, FOTA_MAX_RETRIES);
+    return;
+  }
+
+  logf("FOTA      — ROLLBACK: %d failed boots on %s, reverting...\n",
+       fails, lastTgt);
+
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  const esp_partition_t* ota0    = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+  const esp_partition_t* ota1    = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
+  const esp_partition_t* prev    = (running == ota0) ? ota1 : ota0;
+
+  esp_app_desc_t desc;
+  if (prev && esp_ota_get_partition_description(prev, &desc) == ESP_OK) {
+    fota.putString("rollbackFrom", lastTgt);
+    fota.putString("badVer",       lastTgt);
+    fota.putInt("flashPend", 0);
+    fota.putInt("fails",     0);
+    fota.end();
+    esp_ota_set_boot_partition(prev);
+    esp_restart();
+  } else {
+    logf("FOTA      — ROLLBACK FAILED: no valid previous partition, stuck on %s\n",
+         lastTgt);
+    fota.putString("badVer", lastTgt);
+    fota.putInt("flashPend", 0);
+    fota.putInt("fails",     0);
+    fota.end();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
 //  MAIN
 // ═══════════════════════════════════════════════════════════
 
@@ -2304,6 +2397,7 @@ void setup() {
   // ── Load config first so syslog server address is available ──
   loadConfig();
   validateConfig();
+  checkFotaBootHealth();
 
   // ── Early sensor power-on for parallel stabilization ──
   if (configLoaded && cfg.sensorPowerPin >= 0) {
@@ -2449,6 +2543,18 @@ void setup() {
     SENSOR_ID, moisturePart, batteryPart, batRawMv, WiFi.RSSI(), FIRMWARE_VERSION, timestamp);
   bool ok = mqtt.publish(STATE_TOPIC, payload, true);
   logf("State     — %s: %s\n", ok ? "published" : "FAILED", payload);
+
+  // Confirm firmware good on first successful publish after a FOTA flash
+  if (ok) {
+    Preferences fota;
+    fota.begin("fota", false);
+    if (fota.getInt("flashPend", 0)) {
+      fota.putInt("flashPend", 0);
+      fota.putInt("fails",     0);
+      logf("FOTA      — %s confirmed good\n", FIRMWARE_VERSION);
+    }
+    fota.end();
+  }
 
   // ── Listen for incoming commands ────────────────────────
   logf("MQTT      — listening for commands...\n");
