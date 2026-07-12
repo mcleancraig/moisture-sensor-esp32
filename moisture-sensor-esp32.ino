@@ -235,7 +235,7 @@ public:
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "3.0.1"
+#define FIRMWARE_VERSION "3.0.2-b01"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -1912,10 +1912,10 @@ static bool shouldPublishDiscovery() {
   prefs.end();
 
   if (lastVer != FIRMWARE_VERSION) return true;                        // firmware changed
-  if ((uint32_t)time(nullptr) - lastTs > 7 * 86400UL) return true;    // >7 days
+  if ((uint32_t)time(nullptr) - lastTs > 2 * 3600UL) return true;     // >2 h — recover after broker restart
 
-  logf("Discovery — skipped (%s, %ldd ago)\n",
-       FIRMWARE_VERSION, (long)((uint32_t)time(nullptr) - lastTs) / 86400);
+  logf("Discovery — skipped (%s, %ldm ago)\n",
+       FIRMWARE_VERSION, (long)((uint32_t)time(nullptr) - lastTs) / 60);
   return false;
 }
 
