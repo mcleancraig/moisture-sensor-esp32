@@ -19,6 +19,7 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 - Reed switch restart — hold magnet to restart without opening enclosure
 - MQTT command support — send `reset` remotely via retained message
 - Deep sleep between readings — configurable interval (default 120 minutes) for long battery life
+- First boot delay — skips moisture on first wake (default 15 minutes) so an open-air reading isn't sent while planting
 - NTP timestamp in every MQTT payload
 - Firmware version reported in every MQTT payload
 
@@ -122,6 +123,8 @@ where `AABBCC` is the last three bytes of the device's MAC address in hex.
 4. Click **Save & Restart**
 
 The sensor will restart, connect to your network, and begin reporting immediately.
+
+**First boot delay:** on the first wake after power-on or portal save, the sensor skips the moisture reading and sleeps for 15 minutes before taking its first full reading. This prevents a misleading open-air reading being sent to Home Assistant while you're getting the sensor into the soil. Battery stats are still published on that first wake. The delay is configurable (0–120 minutes) via the **First Boot Delay** entity in Home Assistant, or disabled by setting it to 0.
 
 If the portal is not used within 10 minutes it will close, the sensor sleeps for 10 minutes, then restarts and tries WiFi again. If WiFi fails on a configured sensor, the portal opens automatically so you can update credentials.
 
