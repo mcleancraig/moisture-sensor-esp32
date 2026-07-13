@@ -1974,9 +1974,9 @@ void publishDiscovery() {
   };
 
   const SensorEntity sensors[] = {
-    { "Moisture",         "moisture",    "moisture",   "\"unit_of_measurement\":\"%%\",\"device_class\":\"moisture\",\"state_class\":\"measurement\",\"icon\":\"mdi:water-percent\"" },
+    { "Moisture",         "moisture",    "moisture",   "\"unit_of_measurement\":\"%\",\"device_class\":\"moisture\",\"state_class\":\"measurement\",\"icon\":\"mdi:water-percent\"" },
     { "Battery Voltage",  "battery_v",   "battery_v",  "\"unit_of_measurement\":\"V\",\"device_class\":\"voltage\",\"state_class\":\"measurement\",\"icon\":\"mdi:battery\"" },
-    { "Battery",          "battery_pct", "battery_pct", "\"unit_of_measurement\":\"%%\",\"device_class\":\"battery\",\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\"" },
+    { "Battery",          "battery_pct", "battery_pct", "\"unit_of_measurement\":\"%\",\"device_class\":\"battery\",\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\"" },
     { "Last Seen",        "ts",          "ts",         "\"device_class\":\"timestamp\",\"icon\":\"mdi:clock-outline\"" },
     { "Firmware Version", "fw",          "fw_version", "\"icon\":\"mdi:chip\"" },
     { "RSSI",             "rssi",        "rssi",       "\"device_class\":\"signal_strength\",\"unit_of_measurement\":\"dBm\",\"state_class\":\"measurement\",\"icon\":\"mdi:wifi\"" }
