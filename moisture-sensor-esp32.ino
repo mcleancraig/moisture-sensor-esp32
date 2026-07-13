@@ -354,6 +354,8 @@ RTC_DATA_ATTR static WifiCache wifiCache = { .valid = false };
 // defined before any call site (loadConfig, clearConfig, saveConfig) so it
 // resolves here, not to math.h's float logf(float).
 #define logf(fmt, ...) _logf(__func__, fmt, ##__VA_ARGS__)
+void _logf(const char* func, const char* fmt, ...);
+static bool hasValidEpoch();
 
 // NVS magic — identifies config written by this firmware.
 // Wrong value means a different firmware used our namespace; absent means
