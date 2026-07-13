@@ -14,7 +14,9 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 - Static or DHCP IP addressing, with configurable gateway, subnet and DNS
 - Home Assistant MQTT autodiscovery — sensors appear automatically, autodiscovery republishes every 2 hours to recover from broker restarts
 - Automatic firmware updates via FOTA from GitHub Releases, with rollback guard after 3 failed boots
+- Beta FOTA channel — switch individual sensors between stable and beta firmware streams via Home Assistant
 - Sensor power-gating — GPIO cuts HW-390 power during deep sleep, eliminating standby drain
+- Syslog — structured UDP syslog to a configurable host for centralised logging
 - Boot button reconfiguration — no reflashing needed to change settings
 - Reed switch restart — hold magnet to restart without opening enclosure
 - MQTT command support — send `reset` remotely via retained message
@@ -178,16 +180,32 @@ The sensor uses MQTT autodiscovery. Once MQTT is configured in Home Assistant:
 
 Each sensor creates these entities in Home Assistant:
 
-| Entity | Type | Unit | Notes |
-|---|---|---|---|
-| Moisture | Sensor | % | Soil moisture level |
-| Battery | Sensor | % | Estimated charge remaining |
-| Battery Voltage | Sensor | V | Raw cell voltage |
-| Last Seen | Sensor | — | NTP timestamp of last reading (UTC) |
-| Firmware Version | Sensor | — | Running firmware version |
-| RSSI | Sensor | dBm | WiFi signal strength at time of reading |
-| Battery Low | Binary sensor | — | ON when battery ≤ 15% |
-| Reset Config | Button | — | Clears NVS and opens captive portal on next wake |
+**Sensors**
+
+| Entity | Unit | Notes |
+|---|---|---|
+| Moisture | % | Soil moisture level |
+| Battery | % | Estimated charge remaining |
+| Battery Voltage | V | Raw cell voltage |
+| Last Seen | — | NTP timestamp of last reading (UTC) |
+| Firmware Version | — | Running firmware version |
+| RSSI | dBm | WiFi signal strength at time of reading |
+| Battery Low | — | Binary sensor — ON when battery ≤ 15% |
+
+**Controls**
+
+| Entity | Type | Notes |
+|---|---|---|
+| Reset Config | Button | Clears NVS and opens captive portal on next wake |
+| Force check on next wake | Button | Bypasses the 24 h FOTA throttle — triggers an immediate update check |
+| Sleep Interval | Number (1–720 min) | Wake cycle duration; default 120 min |
+| First Boot Delay | Number (0–120 min) | Delay before first moisture read; default 15 min |
+| Update Channel | Select (stable/beta) | FOTA release stream for this sensor |
+| Static IP | Switch | Enable/disable static IP addressing |
+| MQTT Broker / Port / Username / Password | Text/Number | Remote MQTT config update |
+| Syslog Host / Port | Text/Number | Remote syslog config update |
+| IP Address / Gateway / Subnet Mask / DNS | Text | Remote network config update |
+| Moisture Pin / Battery Pin / Sensor Power Pin | Number | GPIO pin assignments |
 
 The device card also shows the firmware version (`sw_version`) on the device info page.
 
@@ -205,6 +223,9 @@ The device card also shows the firmware version (`sw_version`) on the device inf
 | `homeassistant/sensor/sensor1_rssi/config` | Sensor → broker | HA discovery config (retained) |
 | `homeassistant/binary_sensor/sensor1_battery_low/config` | Sensor → broker | HA discovery config (retained) |
 | `homeassistant/button/sensor1_reset/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/button/sensor1_update_check/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/select/sensor1_fw_channel/config` | Sensor → broker | HA discovery config (retained) |
+| `garden/sensor1/update` | Broker → sensor | Retained `1` — forces FOTA check on next wake |
 
 ### State payload example
 
@@ -242,6 +263,10 @@ The `fw_version` field in the MQTT payload confirms the running firmware version
 
 **FOTA rollback guard:** after a FOTA flash, the firmware counts consecutive failed boots (defined as wakes that do not complete a successful MQTT publish). After 3 failures it switches back to the previous OTA partition and logs `FOTA — ROLLED BACK` via syslog. The rejected version is blocked from re-downloading.
 
+**Update Channel:** each sensor can independently follow the `stable` channel (GitHub Releases marked *Latest*) or the `beta` channel (most recent release including pre-releases). Switch a sensor by changing its **Update Channel** entity in Home Assistant — the new value is written to NVS on next wake. Default is `stable`.
+
+**Force check on next wake:** pressing the **Force check on next wake** button in HA publishes a retained `1` to `garden/sensorN/update`. The sensor reads this on its next wake, clears the retained message, and runs a FOTA check immediately regardless of the 24 h throttle.
+
 **Tagging and releasing from the command line:**
 
 ```bash
@@ -250,6 +275,25 @@ git push origin v2.1.0
 ```
 
 Then on GitHub go to **Releases → Draft a new release**, select the tag, and attach `firmware.bin` and `version.txt`.
+
+---
+
+## Syslog
+
+The sensor buffers log messages during its wake cycle and flushes them over UDP syslog after WiFi connects. This gives centralised, structured logging without a serial connection.
+
+**Configuration:** set `Syslog Host` and `Syslog Port` in the captive portal, or update them remotely via the corresponding HA entities. Default port is `514`. Leave `Syslog Host` blank to disable syslog.
+
+**Behaviour:**
+- All `logf()` calls are buffered in RAM during boot and WiFi connection
+- After WiFi connects the buffer is flushed: each entry is sent as a syslog UDP packet to the configured host
+- If DNS resolution fails for the syslog host the buffer is discarded and syslog is skipped for that cycle (no startup delay)
+- After flush, any subsequent log calls are sent immediately
+
+**Useful log patterns:**
+- `FOTA      — ROLLED BACK` — firmware rollback guard fired; investigate what changed
+- `Discovery — skipped (3.0.2, NNm ago)` — discovery republish throttled; expected behaviour
+- `FOTA      — forced check` — triggered by the Force check HA button
 
 ---
 
