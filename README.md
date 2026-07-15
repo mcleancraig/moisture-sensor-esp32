@@ -12,12 +12,16 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 - Battery voltage and percentage monitoring
 - WiFi provisioning via captive portal — no hardcoded credentials
 - Static or DHCP IP addressing, with configurable gateway, subnet and DNS
-- Home Assistant MQTT autodiscovery — sensors appear automatically
-- Automatic firmware updates via FOTA from GitHub Releases
+- Home Assistant MQTT autodiscovery — sensors appear automatically, autodiscovery republishes every 2 hours to recover from broker restarts
+- Automatic firmware updates via FOTA from GitHub Releases, with rollback guard after 3 failed boots
+- Beta FOTA channel — switch individual sensors between stable and beta firmware streams via Home Assistant
+- Sensor power-gating — GPIO cuts HW-390 power during deep sleep, eliminating standby drain
+- Syslog — structured UDP syslog to a configurable host for centralised logging
 - Boot button reconfiguration — no reflashing needed to change settings
 - Reed switch restart — hold magnet to restart without opening enclosure
 - MQTT command support — send `reset` remotely via retained message
 - Deep sleep between readings — configurable interval (default 120 minutes) for long battery life
+- First boot delay — skips moisture on first wake (default 15 minutes) so an open-air reading isn't sent while planting
 - NTP timestamp in every MQTT payload
 - Firmware version reported in every MQTT payload
 
@@ -102,14 +106,14 @@ No configuration changes are needed before flashing — all settings are entered
 On first boot (or after a factory reset), the sensor starts a WiFi access point named:
 
 ```
-MOISTURE_XXXXXXXXXXXX
+MOISTURE-AABBCC
 ```
 
-where `XXXXXXXXXXXX` is the device's unique MAC address.
+where `AABBCC` is the last three bytes of the device's MAC address in hex.
 
 **To configure:**
 
-1. Connect to the `MOISTURE_` network — password is `moisture`
+1. Connect to the `MOISTURE-` network — password is `moisture`
 2. A setup page will appear automatically (captive portal). If it does not, open a browser and navigate to `192.168.4.1`
 3. Fill in the form:
    - **Sensor number** — sets the sensor ID (`sensor1`, `sensor2` etc), friendly name, and default static IP last octet
@@ -121,6 +125,8 @@ where `XXXXXXXXXXXX` is the device's unique MAC address.
 4. Click **Save & Restart**
 
 The sensor will restart, connect to your network, and begin reporting immediately.
+
+**First boot delay:** on the first wake after power-on or portal save, the sensor skips the moisture reading and sleeps for 15 minutes before taking its first full reading. This prevents a misleading open-air reading being sent to Home Assistant while you're getting the sensor into the soil. Battery stats are still published on that first wake. The delay is configurable (0–120 minutes) via the **First Boot Delay** entity in Home Assistant, or disabled by setting it to 0.
 
 If the portal is not used within 10 minutes it will close, the sensor sleeps for 10 minutes, then restarts and tries WiFi again. If WiFi fails on a configured sensor, the portal opens automatically so you can update credentials.
 
@@ -174,12 +180,32 @@ The sensor uses MQTT autodiscovery. Once MQTT is configured in Home Assistant:
 
 Each sensor creates these entities in Home Assistant:
 
+**Sensors**
+
 | Entity | Unit | Notes |
 |---|---|---|
 | Moisture | % | Soil moisture level |
 | Battery | % | Estimated charge remaining |
 | Battery Voltage | V | Raw cell voltage |
 | Last Seen | — | NTP timestamp of last reading (UTC) |
+| Firmware Version | — | Running firmware version |
+| RSSI | dBm | WiFi signal strength at time of reading |
+| Battery Low | — | Binary sensor — ON when battery ≤ 15% |
+
+**Controls**
+
+| Entity | Type | Notes |
+|---|---|---|
+| Reset Config | Button | Clears NVS and opens captive portal on next wake |
+| Force check on next wake | Button | Bypasses the 24 h FOTA throttle — triggers an immediate update check |
+| Sleep Interval | Number (1–720 min) | Wake cycle duration; default 120 min |
+| First Boot Delay | Number (0–120 min) | Delay before first moisture read; default 15 min |
+| Update Channel | Select (stable/beta) | FOTA release stream for this sensor |
+| Static IP | Switch | Enable/disable static IP addressing |
+| MQTT Broker / Port / Username / Password | Text/Number | Remote MQTT config update |
+| Syslog Host / Port | Text/Number | Remote syslog config update |
+| IP Address / Gateway / Subnet Mask / DNS | Text | Remote network config update |
+| Moisture Pin / Battery Pin / Sensor Power Pin | Number | GPIO pin assignments |
 
 The device card also shows the firmware version (`sw_version`) on the device info page.
 
@@ -187,12 +213,19 @@ The device card also shows the firmware version (`sw_version`) on the device inf
 
 | Topic | Direction | Content |
 |---|---|---|
-| `garden/sensor1/state` | Sensor to broker | JSON state payload |
-| `garden/sensor1/cmd` | Broker to sensor | Command: `reset` (retained) |
-| `homeassistant/sensor/sensor1_moisture/config` | Sensor to broker | HA discovery config (retained) |
-| `homeassistant/sensor/sensor1_battery_v/config` | Sensor to broker | HA discovery config (retained) |
-| `homeassistant/sensor/sensor1_battery_pct/config` | Sensor to broker | HA discovery config (retained) |
-| `homeassistant/sensor/sensor1_ts/config` | Sensor to broker | HA discovery config (retained) |
+| `garden/sensor1/state` | Sensor → broker | JSON state payload |
+| `garden/sensor1/cmd` | Broker → sensor | Command: `reset` (retained) |
+| `homeassistant/sensor/sensor1_moisture/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/sensor/sensor1_battery_pct/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/sensor/sensor1_battery_v/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/sensor/sensor1_ts/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/sensor/sensor1_fw/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/sensor/sensor1_rssi/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/binary_sensor/sensor1_battery_low/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/button/sensor1_reset/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/button/sensor1_update_check/config` | Sensor → broker | HA discovery config (retained) |
+| `homeassistant/select/sensor1_fw_channel/config` | Sensor → broker | HA discovery config (retained) |
+| `garden/sensor1/update` | Broker → sensor | Retained `1` — forces FOTA check on next wake |
 
 ### State payload example
 
@@ -206,7 +239,8 @@ The device card also shows the firmware version (`sw_version`) on the device inf
   "battery_v": 3.87,
   "battery_pct": 62,
   "battery_raw_mv": 1935,
-  "fw": "2.1.0",
+  "rssi": -67,
+  "fw_version": "3.0.2-b01",
   "ts": "2026-05-04T14:32:07Z"
 }
 ```
@@ -220,12 +254,18 @@ On each wake the sensor checks GitHub Releases for a newer firmware version and 
 **To release a firmware update:**
 
 1. Bump `FIRMWARE_VERSION` in the sketch
-2. In Arduino IDE go to **Sketch → Export Compiled Binary** — find the `.bin` file in your sketch folder
-3. Create a plain text file `version.txt` containing just the new version number (e.g. `2.1.0`) with no trailing whitespace
+2. Run `build.sh` to compile — output is `build/moisture-sensor-esp32.ino.bin`
+3. Create a plain text file `version.txt` containing just the new version number (e.g. `3.0.2`) with no trailing newline
 4. Create a new GitHub release tagged `vX.X.X`, attach both `moisture-sensor-esp32.ino.bin` and `version.txt` as release assets
 5. Every sensor will pick up the update automatically on its next wake cycle
 
-The `fw` field in the MQTT payload confirms the running firmware version. If an update fails the sensor continues operating on the existing firmware and retries on the next wake.
+The `fw_version` field in the MQTT payload confirms the running firmware version. If an update fails the sensor continues operating on the existing firmware and retries on the next wake.
+
+**FOTA rollback guard:** after a FOTA flash, the firmware counts consecutive failed boots (defined as wakes that do not complete a successful MQTT publish). After 3 failures it switches back to the previous OTA partition and logs `FOTA — ROLLED BACK` via syslog. The rejected version is blocked from re-downloading.
+
+**Update Channel:** each sensor can independently follow the `stable` channel (GitHub Releases marked *Latest*) or the `beta` channel (most recent release including pre-releases). Switch a sensor by changing its **Update Channel** entity in Home Assistant — the new value is written to NVS on next wake. Default is `stable`.
+
+**Force check on next wake:** pressing the **Force check on next wake** button in HA publishes a retained `1` to `garden/sensorN/update`. The sensor reads this on its next wake, clears the retained message, and runs a FOTA check immediately regardless of the 24 h throttle.
 
 **Tagging and releasing from the command line:**
 
@@ -235,6 +275,25 @@ git push origin v2.1.0
 ```
 
 Then on GitHub go to **Releases → Draft a new release**, select the tag, and attach `firmware.bin` and `version.txt`.
+
+---
+
+## Syslog
+
+The sensor buffers log messages during its wake cycle and flushes them over UDP syslog after WiFi connects. This gives centralised, structured logging without a serial connection.
+
+**Configuration:** set `Syslog Host` and `Syslog Port` in the captive portal, or update them remotely via the corresponding HA entities. Default port is `514`. Leave `Syslog Host` blank to disable syslog.
+
+**Behaviour:**
+- All `logf()` calls are buffered in RAM during boot and WiFi connection
+- After WiFi connects the buffer is flushed: each entry is sent as a syslog UDP packet to the configured host
+- If DNS resolution fails for the syslog host the buffer is discarded and syslog is skipped for that cycle (no startup delay)
+- After flush, any subsequent log calls are sent immediately
+
+**Useful log patterns:**
+- `FOTA      — ROLLED BACK` — firmware rollback guard fired; investigate what changed
+- `Discovery — skipped (3.0.2, NNm ago)` — discovery republish throttled; expected behaviour
+- `FOTA      — forced check` — triggered by the Force check HA button
 
 ---
 
@@ -255,15 +314,15 @@ The HW-390 is inverted: dry soil reads a higher millivolt value than wet soil. `
 
 ## Battery life
 
-Based on a 15-minute sleep cycle and 2000mAh cell:
+Based on a 120-minute sleep cycle (default) and 2000mAh cell:
 
 | Phase | Current | Duration per cycle |
 |---|---|---|
-| Deep sleep | ~15uA | ~895 seconds |
+| Deep sleep | ~15uA | ~7,195 seconds |
 | WiFi + MQTT | ~300mA peak | ~3 seconds |
 | FOTA version check | ~80mA | ~2 seconds (no download if firmware is current) |
 
-Estimated runtime: **4–5 months** per charge. Actual runtime depends on WiFi signal strength, temperature, and cell quality.
+Estimated runtime: **5+ months** per charge. Actual runtime depends on WiFi signal strength, temperature, and cell quality.
 
 The battery percentage uses a piecewise linear interpolation of a real 18650 discharge curve, giving accurate readings across the full voltage range rather than fixed steps.
 
@@ -304,7 +363,7 @@ mosquitto_sub -h localhost -t "garden/#" -v -u YOUR_USER -P YOUR_PASSWORD
 **FOTA update not applying**
 - Ensure the sensor has internet access — verify DNS is configured correctly in the portal
 - Confirm `version.txt` is attached to the latest GitHub release and contains the correct version string with no trailing whitespace or newlines
-- Check the `fw` field in the MQTT payload to confirm what version is currently running
+- Check the `fw_version` field in the MQTT payload to confirm what version is currently running
 
 **Moisture reading stuck at 0% or 100%**
 Recalibrate — the `DRY_MV` and `WET_MV` values in the firmware need to match your specific sensor unit. Check `moisture_raw_mv` in the MQTT payload and compare against your calibration readings.

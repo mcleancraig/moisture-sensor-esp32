@@ -24,6 +24,16 @@ public:
 };
 
 // ═══════════════════════════════════════════════════════════
+//  v3.0.2
+//  - MQTT autodiscovery republish interval reduced from 7 days
+//    to 2 hours. HA entities now recover within one wake cycle
+//    after a broker restart or retained-message loss.
+//  - Fix: %% corrected to % in moisture and battery_pct
+//    unit_of_measurement discovery payloads. HA was rejecting
+//    these entity configs due to the literal %% in the JSON.
+//  - Fix: forward declarations added for _logf and hasValidEpoch
+//    to allow compilation on Apple Silicon without Rosetta.
+// ═══════════════════════════════════════════════════════════
 //  v3.0.1
 //  - Completely removed the unused Reed Switch code, including
 //    the portal input fields, JavaScript/server-side validation,
@@ -235,7 +245,7 @@ public:
 
 // Dev builds: update the SHA suffix with `git rev-parse --short HEAD` before flashing.
 // Beta builds: use 2.8.0-b01, 2.8.0-b02 … (zero-padded, sortable by string compare).
-#define FIRMWARE_VERSION "3.0.1"
+#define FIRMWARE_VERSION "3.0.2"
 
 // ── Pins ─────────────────────────────────────────────────
 const int MOISTURE_PIN = 0;   // A0 — XIAO ESP32-C6
@@ -354,6 +364,8 @@ RTC_DATA_ATTR static WifiCache wifiCache = { .valid = false };
 // defined before any call site (loadConfig, clearConfig, saveConfig) so it
 // resolves here, not to math.h's float logf(float).
 #define logf(fmt, ...) _logf(__func__, fmt, ##__VA_ARGS__)
+void _logf(const char* func, const char* fmt, ...);
+static bool hasValidEpoch();
 
 // NVS magic — identifies config written by this firmware.
 // Wrong value means a different firmware used our namespace; absent means
@@ -1912,10 +1924,10 @@ static bool shouldPublishDiscovery() {
   prefs.end();
 
   if (lastVer != FIRMWARE_VERSION) return true;                        // firmware changed
-  if ((uint32_t)time(nullptr) - lastTs > 7 * 86400UL) return true;    // >7 days
+  if ((uint32_t)time(nullptr) - lastTs > 2 * 3600UL) return true;     // >2 h — recover after broker restart
 
-  logf("Discovery — skipped (%s, %ldd ago)\n",
-       FIRMWARE_VERSION, (long)((uint32_t)time(nullptr) - lastTs) / 86400);
+  logf("Discovery — skipped (%s, %ldm ago)\n",
+       FIRMWARE_VERSION, (long)((uint32_t)time(nullptr) - lastTs) / 60);
   return false;
 }
 
@@ -1974,9 +1986,9 @@ void publishDiscovery() {
   };
 
   const SensorEntity sensors[] = {
-    { "Moisture",         "moisture",    "moisture",   "\"unit_of_measurement\":\"%%\",\"device_class\":\"moisture\",\"state_class\":\"measurement\",\"icon\":\"mdi:water-percent\"" },
+    { "Moisture",         "moisture",    "moisture",   "\"unit_of_measurement\":\"%\",\"device_class\":\"moisture\",\"state_class\":\"measurement\",\"icon\":\"mdi:water-percent\"" },
     { "Battery Voltage",  "battery_v",   "battery_v",  "\"unit_of_measurement\":\"V\",\"device_class\":\"voltage\",\"state_class\":\"measurement\",\"icon\":\"mdi:battery\"" },
-    { "Battery",          "battery_pct", "battery_pct", "\"unit_of_measurement\":\"%%\",\"device_class\":\"battery\",\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\"" },
+    { "Battery",          "battery_pct", "battery_pct", "\"unit_of_measurement\":\"%\",\"device_class\":\"battery\",\"state_class\":\"measurement\",\"icon\":\"mdi:battery-percent\"" },
     { "Last Seen",        "ts",          "ts",         "\"device_class\":\"timestamp\",\"icon\":\"mdi:clock-outline\"" },
     { "Firmware Version", "fw",          "fw_version", "\"icon\":\"mdi:chip\"" },
     { "RSSI",             "rssi",        "rssi",       "\"device_class\":\"signal_strength\",\"unit_of_measurement\":\"dBm\",\"state_class\":\"measurement\",\"icon\":\"mdi:wifi\"" }
