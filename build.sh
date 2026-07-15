@@ -6,6 +6,7 @@ FQBN="esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc"
 
 "/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli" compile \
   --fqbn "$FQBN" \
+  --libraries "$HOME/Documents/Arduino/libraries" \
   --output-dir build/ \
   "$SKETCH"
 
