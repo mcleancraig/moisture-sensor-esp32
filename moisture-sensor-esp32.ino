@@ -24,6 +24,16 @@ public:
 };
 
 // ═══════════════════════════════════════════════════════════
+//  v3.0.2
+//  - MQTT autodiscovery republish interval reduced from 7 days
+//    to 2 hours. HA entities now recover within one wake cycle
+//    after a broker restart or retained-message loss.
+//  - Fix: %% corrected to % in moisture and battery_pct
+//    unit_of_measurement discovery payloads. HA was rejecting
+//    these entity configs due to the literal %% in the JSON.
+//  - Fix: forward declarations added for _logf and hasValidEpoch
+//    to allow compilation on Apple Silicon without Rosetta.
+// ═══════════════════════════════════════════════════════════
 //  v3.0.1
 //  - Completely removed the unused Reed Switch code, including
 //    the portal input fields, JavaScript/server-side validation,
