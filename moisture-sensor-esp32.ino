@@ -265,9 +265,20 @@ const int AP_TIMEOUT_MIN     = 10;
 const int AP_SLEEP_MIN       = 10;
 const int BOOT_HOLD_MS       = 3000;
 const int NTP_TIMEOUT_MS     = 10000;
-const int CMD_LISTEN_MS      = 2000;
+// Retained commands are delivered by the broker within tens of ms of SUBACK,
+// so the base window is short. Each message received extends it by
+// CMD_LISTEN_GRACE_MS (capped at CMD_LISTEN_MAX_MS) so a burst — e.g. several
+// config/set fields published together — is still captured in one wake.
+const int CMD_LISTEN_MS       = 750;
+const int CMD_LISTEN_GRACE_MS = 250;
+const int CMD_LISTEN_MAX_MS   = 2000;
 const int WIFI_TIMEOUT_MS    = 10000;  // max time waiting for WiFi association
 const int MQTT_TIMEOUT_S     =     5;  // TCP socket timeout per connect attempt
+// Safety net for retained-discovery loss after a broker restart. Must stay
+// comfortably above the longest sleepMinutes (720) or the throttle never
+// fires and discovery republishes on every wake.
+const uint32_t DISCOVERY_REPUBLISH_S = 24 * 3600UL;
+
 const int FOTA_VERSION_TIMEOUT_MS = 8000;   // version.txt HTTP fetch
 const int FOTA_DL_TIMEOUT_MS      = 60000;  // firmware.bin download (large file)
 const int FOTA_MAX_RETRIES        = 3;      // failed boots before rollback
@@ -1569,6 +1580,10 @@ void goToSleep(int minutes) {
     logf("Power     — sensorPowerPin GPIO%d set LOW & INPUT (tri-stated for deep sleep)\n", cfg.sensorPowerPin);
   }
 
+  // millis() is time since boot, and deep sleep restarts the sketch, so this
+  // is the whole awake duration for this wake — the number to watch when
+  // tuning per-wake energy use.
+  logf("Sleep     — awake %lums this wake\n", millis());
   logf("Sleep     — going to sleep for %d minutes\n", minutes);
 
 
@@ -1647,6 +1662,7 @@ int batteryPercent(float voltage) {
 // ═══════════════════════════════════════════════════════════
 
 bool connectWifi() {
+  unsigned long connectStart = millis();
   WiFi.mode(WIFI_STA);
 
   if (cfg.staticIP) {
@@ -1685,7 +1701,9 @@ bool connectWifi() {
   Serial.println();
 
   // If fast connect failed, clear cache and retry normal connect immediately
+  bool usedFallback = false;
   if (WiFi.status() != WL_CONNECTED && triedCache) {
+    usedFallback = true;
     logf("WiFi      — fast connect failed, retrying full scan connect\n");
     wifiCache.valid = false;
     WiFi.disconnect();
@@ -1703,7 +1721,10 @@ bool connectWifi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    logf("WiFi      — connected, IP: %s\n", WiFi.localIP().toString().c_str());
+    logf("WiFi      — connected, IP: %s (%lums, %s)\n",
+         WiFi.localIP().toString().c_str(),
+         millis() - connectStart,
+         (triedCache && !usedFallback) ? "cached" : "full scan");
     // Cache the successful connection details
     memcpy(wifiCache.bssid, WiFi.BSSID(), 6);
     wifiCache.channel = WiFi.channel();
@@ -1725,6 +1746,11 @@ PubSubClient mqtt(wifiClient);
 
 bool cmdReceived    = false;
 char cmdPayload[32] = "";
+
+// Incremented by mqttCallback on every inbound message, whatever the topic.
+// The listen loop watches this to extend its window while messages are still
+// arriving. Only ever read outside the callback.
+volatile uint32_t mqttRxCount = 0;
 
 // ── Pending remote config updates ────────────────────────────
 // Set in mqttCallback (minimal work only — no validation, no String objects,
@@ -1782,6 +1808,8 @@ static uint32_t pendingFields        = 0;   // bitmask — which fields arrived 
 // All validation, cfg mutation, and logging happens in applyConfigChange()
 // outside the callback, after the listen loop completes.
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  mqttRxCount++;   // listen loop uses this to extend its window mid-burst
+
   // ── Force-FOTA flag ───────────────────────────────────────
   // UPDATE_TOPIC carries a retained "1" when the HA button is pressed.
   // Set the in-memory flag here; the retained message is cleared outside
@@ -1913,7 +1941,7 @@ void processMqttCommand() {
 // Returns true if discovery payloads should be published this wake.
 // Skipped on normal deep-sleep wakes once published (discoveryDone in RTC).
 // Force-republished on cold boot, OTA restart, firmware version change, or
-// after 7 days (broker safety net for retained-message loss after restart).
+// after DISCOVERY_REPUBLISH_S (broker safety net for retained-message loss).
 static bool shouldPublishDiscovery() {
   if (!discoveryDone) return true;               // cold boot / OTA restart
   if (!hasValidEpoch()) return false;            // no clock, stay quiet
@@ -1924,7 +1952,7 @@ static bool shouldPublishDiscovery() {
   prefs.end();
 
   if (lastVer != FIRMWARE_VERSION) return true;                        // firmware changed
-  if ((uint32_t)time(nullptr) - lastTs > 2 * 3600UL) return true;     // >2 h — recover after broker restart
+  if ((uint32_t)time(nullptr) - lastTs > DISCOVERY_REPUBLISH_S) return true;
 
   logf("Discovery — skipped (%s, %ldm ago)\n",
        FIRMWARE_VERSION, (long)((uint32_t)time(nullptr) - lastTs) / 60);
@@ -2570,11 +2598,26 @@ void setup() {
 
   // ── Listen for incoming commands ────────────────────────
   logf("MQTT      — listening for commands...\n");
-  unsigned long listenDeadline = millis() + CMD_LISTEN_MS;
+  unsigned long listenStart    = millis();
+  unsigned long listenDeadline = listenStart + CMD_LISTEN_MS;
+  unsigned long listenCap      = listenStart + CMD_LISTEN_MAX_MS;
+  uint32_t      seenRx         = mqttRxCount;
   while (millis() < listenDeadline) {
     mqtt.loop();
+    if (mqttRxCount != seenRx) {
+      // Still receiving — hold the window open a little longer, but never
+      // past the cap, so a chatty broker can't keep us awake indefinitely.
+      seenRx = mqttRxCount;
+      unsigned long extended = millis() + CMD_LISTEN_GRACE_MS;
+      if (extended > listenDeadline) listenDeadline = extended;
+      if (listenDeadline > listenCap) listenDeadline = listenCap;
+    }
     delay(10);
   }
+  // Count is for the whole wake, not just this window — retained messages
+  // often land during the earlier publish phase, which also pumps mqtt.loop().
+  logf("MQTT      — listen window closed after %lums (%lu message(s) this wake)\n",
+       millis() - listenStart, (unsigned long)mqttRxCount);
 
   processMqttCommand();
   applyConfigChange();

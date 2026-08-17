@@ -3,6 +3,20 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.0.3-b01] — 2026-08-17
+
+### Fixed
+- **HA discovery republished on every wake** — the safety-net threshold was `> 2h`, exactly equal to the default `SLEEP_MINUTES` of 120, so elapsed time always exceeded it and the throttle never fired. Roughly 20 retained discovery payloads were being republished every wake instead of acting as an occasional recovery mechanism, and the `Discovery — skipped` log line was effectively unreachable. Now governed by `DISCOVERY_REPUBLISH_S` (24h), which stays clear of the longest configurable `sleepMinutes` (720).
+
+### Changed
+- **MQTT listen window shortened, 2000ms → 750ms** — retained commands are delivered within tens of milliseconds of SUBACK, so the old fixed 2s window spent most of its time idle at full radio power. Each inbound message now extends the window by 250ms (capped at 2000ms, the previous fixed value), so a burst of `config/set` fields published together is still captured in a single wake. Worst-case awake time is unchanged; typical awake time drops by ~1.25s per wake.
+
+### Added
+- **Wake timing instrumentation** — `WiFi — connected` now reports association time and whether the cached BSSID or a full scan was used; a new `Sleep — awake Nms this wake` line reports total awake duration. Both are intended for measuring per-wake energy across the fleet from syslog.
+
+### Upgrade notes
+- Discovery now republishes at most daily rather than every 2 hours. After an MQTT broker restart that loses retained messages, Home Assistant may show a sensor as unavailable for up to 24h. A firmware update or power cycle forces an immediate republish, as before.
+
 ## [3.0.1-b02] — 2026-07-04
 
 ### Added
