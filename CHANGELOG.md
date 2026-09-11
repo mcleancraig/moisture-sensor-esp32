@@ -3,10 +3,15 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [3.0.4-b01] — 2026-09-11
+## [3.0.4-b02] — 2026-09-11
 
 ### Changed
-- **Captive portal served gzip-compressed** — the config page (`CONFIG_HTML`, 12.8KB) is now generated from `captive-portal.html` into two gzip-compressed variants (`config_html_gz.h`, via `tools/gen_config_html.py`) with the update-channel dropdown pre-selected at build time instead of via a runtime `String::replace()`. `handleRoot()` serves the precompiled bytes directly with `Content-Encoding: gzip`. Frees ~8.8KB of flash (sketch usage 99% → 98% of the 1.28MB partition) with no behavior change to the portal itself.
+- **Captive portal served gzip-compressed** — the config page (`CONFIG_HTML`, 12.8KB) is now generated from `captive-portal.html` into two gzip-compressed variants (`config_html_gz.h`, via `tools/gen_config_html.py`) with the update-channel dropdown pre-selected at build time instead of via a runtime `String::replace()`. `handleRoot()` serves the precompiled bytes directly with `Content-Encoding: gzip`. Frees ~8.8KB of flash with no behavior change to the portal itself.
+- **FOTA trusts only GitHub's actual root CAs, not the full default bundle** — `SecureClient::enableDefaultBundle()` linked in the ESP32 core's full ~200-CA certificate bundle (68,983 bytes) to validate HTTPS connections that only ever reach two GitHub hosts. Replaced with `WiFiClientSecure::setCACert()` trusting just the two roots those hosts' chains actually terminate at: ISRG Root X1 (Let's Encrypt, for the release-asset CDN) and USERTrust ECC Certification Authority (for github.com/api.github.com). Both chains verified end-to-end against these exact roots. Frees ~68.2KB.
+- **Combined:** sketch flash usage 1,304,434 → 1,227,150 bytes (99% → 93% of the 1.28MB partition), ~77.3KB freed.
+
+### Upgrade notes
+- FOTA now trusts a narrower set of root CAs (2, scoped to GitHub's current infrastructure) instead of the full default bundle (~200). If GitHub changes CA or CDN provider, FOTA will fail closed (safe — connections are simply refused, no silent insecurity) until affected sensors are reflashed with an updated root. Recommend confirming a real FOTA cycle completes successfully on a physical sensor before promoting this beta to stable.
 
 ## [3.0.3] — 2026-09-11
 
