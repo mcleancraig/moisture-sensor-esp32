@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Moisture Sensor Setup</title>
+<style>
+  body{font-family:sans-serif;max-width:460px;margin:40px auto;padding:0 16px;background:#f5f5f5}
+  h1{font-size:1.3em;color:#2c7a4b;margin-bottom:4px}
+  p.sub{color:#666;font-size:.85em;margin-top:0}
+  label{display:block;margin-top:14px;font-size:.9em;color:#333;font-weight:600}
+  input,select{width:100%;padding:8px;margin-top:4px;border:1px solid #ccc;
+    border-radius:6px;font-size:1em;box-sizing:border-box}
+  .optional{color:#888;font-weight:400;font-size:.8em}
+  .section{background:#fff;border-radius:10px;padding:16px;margin:16px 0;
+    box-shadow:0 1px 4px rgba(0,0,0,.08)}
+  button{width:100%;padding:12px;background:#2c7a4b;color:#fff;border:none;
+    border-radius:8px;font-size:1em;cursor:pointer;margin-top:20px}
+  button:hover{background:#215c38}
+  .hint{font-size:.78em;color:#888;margin-top:2px}
+  .ip-wrap{display:flex;gap:4px;margin-top:4px;align-items:center}
+  .ip-wrap input{width:58px;padding:8px;text-align:center;flex:none}
+  .ip-wrap span{color:#555;font-weight:700}
+  #network-rows{display:none;margin-top:4px}
+  .chk-row{display:flex;align-items:center;gap:8px;margin-top:14px}
+  .chk-row input{width:auto;margin:0}
+  h3{font-size:.95em;color:#555;margin:16px 0 4px}
+  .pw-wrap{position:relative;margin-top:4px}
+  .pw-wrap input{margin-top:0;padding-right:38px}
+  .pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);
+    width:auto;padding:4px;background:none;border:none;margin:0;
+    color:#888;cursor:pointer;display:flex;align-items:center;line-height:1}
+  .pw-toggle:hover{background:none;color:#333}
+</style>
+</head>
+<body>
+<h1>Moisture Sensor Setup</h1>
+<p class="sub">Configure this sensor then click Save. It will restart and begin reporting.</p>
+
+<form method="POST" action="/save">
+
+  <div class="section">
+    <label>Sensor number
+      <input type="number" name="sensorNum" id="sensorNum" min="1" max="254"
+        value="1" required oninput="syncNet()">
+    </label>
+    <p class="hint">Sets sensor ID, friendly name, and default last IP octet</p>
+  </div>
+
+  <div class="section">
+    <label>WiFi SSID
+      <input type="text" name="ssid" placeholder="Your network name" required>
+    </label>
+    <label>WiFi password <span class="optional">(optional)</span>
+      <div class="pw-wrap">
+        <input type="password" name="wifiPass"
+          placeholder="Leave blank for open networks">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" aria-label="Show password"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+      </div>
+    </label>
+    <div class="chk-row">
+      <input type="checkbox" name="staticIP" id="staticChk"
+        onchange="toggleNet(this)">
+      <label for="staticChk" style="margin:0;font-weight:600">Use static IP</label>
+    </div>
+
+    <div id="network-rows">
+      <h3>IP address</h3>
+      <div class="ip-wrap">
+        <input type="number" name="ip1" id="ip1" value="192" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="ip2" id="ip2" value="168" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="ip3" id="ip3" value="220" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="ip4" id="ip4" min="1" max="254" value="1">
+      </div>
+
+      <h3>Gateway (router)</h3>
+      <div class="ip-wrap">
+        <input type="number" name="gw1" value="192" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="gw2" value="168" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="gw3" value="1" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="gw4" value="1" min="0" max="255">
+      </div>
+
+      <h3>Subnet mask</h3>
+      <div class="ip-wrap">
+        <input type="number" name="sn1" value="255" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="sn2" value="255" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="sn3" value="0" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="sn4" value="0" min="0" max="255">
+      </div>
+
+      <h3>DNS server</h3>
+      <div class="ip-wrap">
+        <input type="number" name="dns1" value="192" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="dns2" value="168" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="dns3" value="1" min="0" max="255">
+        <span>.</span>
+        <input type="number" name="dns4" value="1" min="0" max="255">
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <label>MQTT broker address
+      <input type="text" name="mqttBroker" placeholder="192.168.1.100" required>
+    </label>
+    <label>MQTT port
+      <input type="number" name="mqttPort" value="1883">
+    </label>
+    <label>MQTT username <span class="optional">(optional)</span>
+      <input type="text" name="mqttUser"
+        placeholder="Leave blank if not required">
+    </label>
+    <label>MQTT password <span class="optional">(optional)</span>
+      <div class="pw-wrap">
+        <input type="password" name="mqttPass"
+          placeholder="Leave blank if not required">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" aria-label="Show password"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+      </div>
+    </label>
+  </div>
+
+  <div class="section">
+    <label>Syslog server <span class="optional">(optional)</span>
+      <input type="text" name="syslogHost" id="syslogHost"
+        placeholder="192.168.1.10 or logs.local">
+    </label>
+    <p class="hint">Must be an IP address or FQDN — short hostnames are not resolved. Leave blank to disable.</p>
+    <label>Syslog port
+      <input type="number" name="syslogPort" value="514">
+    </label>
+    <p class="hint">UDP syslog (RFC 3164). All log output is mirrored here.
+      Compatible with rsyslog, syslog-ng, Graylog, and the Home Assistant
+      Syslog add-on.</p>
+  </div>
+
+  <details style="margin:16px 0">
+    <summary style="font-weight:600;font-size:.95em;color:#555;cursor:pointer;
+      padding:10px 14px;background:#fff;border-radius:8px;
+      box-shadow:0 1px 4px rgba(0,0,0,.08);list-style:none">
+      &#9654; Advanced Settings
+    </summary>
+    <div class="section" style="margin-top:0;border-top-left-radius:0;border-top-right-radius:0">
+      <p class="hint" style="margin-top:0">Change only if your hardware uses different pins than the defaults.
+        Valid range: 0–10 (XIAO GPIO numbers) or -1 for unassigned.</p>
+      <label>Moisture sensor pin
+        <input type="number" name="moisturePin" value="0" min="0" max="10">
+      </label>
+      <p class="hint">Default: 0 (A0/GPIO0)</p>
+      <label>Battery voltage pin
+        <input type="number" name="batteryPin" value="1" min="0" max="10">
+      </label>
+      <label>Sensor power pin
+        <input type="number" name="sensorPowerPin" value="-1" min="-1" max="10">
+      </label>
+      <p class="hint">Default: -1 (Disabled / Constant 3.3V rail)</p>
+      <label>Update channel
+        <select name="fwChannel">
+          <option value="stable">stable</option>
+          <option value="beta">beta</option>
+        </select>
+      </label>
+      <p class="hint">Default: stable (Select 'beta' for pre-releases)</p>
+    </div>
+  </details>
+
+  <div id="err" style="display:none;background:#fde8e8;border:1px solid #c0392b;
+    border-radius:8px;padding:12px 16px;margin-top:12px;color:#c0392b;
+    font-size:.9em;font-weight:600"></div>
+
+  <button type="submit">Save &amp; Restart</button>
+</form>
+
+<script>
+var EYE     = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+var EYE_OFF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+function togglePw(btn) {
+  var inp = btn.previousElementSibling;
+  var show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  btn.innerHTML = show ? EYE_OFF : EYE;
+  btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+}
+function syncNet() {
+  var n = document.getElementById('sensorNum').value;
+  if (document.getElementById('staticChk').checked) {
+    document.getElementById('ip4').value = n;
+  }
+}
+function toggleNet(cb) {
+  document.getElementById('network-rows').style.display =
+    cb.checked ? 'block' : 'none';
+  if (cb.checked) syncNet();
+}
+function isValidIP(s) {
+  var dots = (s.match(/\./g)||[]).length;
+  if (dots !== 3) return false;
+  var p = s.split('.');
+  if (p.length !== 4) return false;
+  return p.every(function(o) {
+    return /^\d+$/.test(o) && parseInt(o,10) >= 0 && parseInt(o,10) <= 255;
+  });
+}
+function isValidHost(s) {
+  if (!s || !s.length) return false;
+  if (s.indexOf('.') === -1) return false;
+  if (!/^[A-Za-z0-9.\-]+$/.test(s)) return false;
+  if (s[0]==='.' || s[0]==='-' || s[s.length-1]==='.' || s[s.length-1]==='-') return false;
+  if (/^[\d.]+$/.test(s)) return isValidIP(s);
+  return true;
+}
+function v(id) {
+  var el = document.querySelector('[name="'+id+'"]');
+  return el ? el.value.trim() : '';
+}
+function fail(e, msg) {
+  var el = document.getElementById('err');
+  el.textContent = msg;
+  el.style.display = 'block';
+  el.scrollIntoView({behavior:'smooth', block:'center'});
+  e.preventDefault();
+}
+function validateForm(e) {
+  document.getElementById('err').style.display = 'none';
+  var n = parseInt(v('sensorNum'),10);
+  if (isNaN(n)||n<1||n>254)
+    return fail(e, 'Sensor number must be between 1 and 254.');
+  if (!v('ssid'))
+    return fail(e, 'WiFi SSID is required.');
+  if (v('ssid').length>63)
+    return fail(e, 'WiFi SSID is too long (max 63 characters).');
+  if (v('wifiPass').length>63)
+    return fail(e, 'WiFi password is too long (max 63 characters).');
+  if (document.querySelector('[name="staticIP"]').checked) {
+    var ipGroups=['ip','gw','sn','dns'];
+    for (var i=0;i<ipGroups.length;i++) {
+      for (var j=1;j<=4;j++) {
+        var val=parseInt(v(ipGroups[i]+j),10);
+        if (isNaN(val)||val<0||val>255)
+          return fail(e, 'IP field '+ipGroups[i]+j+' must be 0-255.');
+      }
+    }
+  }
+  var broker = v('mqttBroker');
+  if (!broker)
+    return fail(e, 'MQTT broker address is required.');
+  if (!isValidHost(broker))
+    return fail(e, 'MQTT broker must be a valid IP address or fully-qualified hostname (e.g. 192.168.1.1 or mqtt.local). Invalid value: "' + broker + '"');
+  var mp = parseInt(v('mqttPort'),10);
+  if (v('mqttPort') && (isNaN(mp)||mp<1||mp>65535))
+    return fail(e, 'MQTT port must be between 1 and 65535.');
+  if (v('mqttUser').length>31)
+    return fail(e, 'MQTT username is too long (max 31 characters).');
+  if (v('mqttPass').length>63)
+    return fail(e, 'MQTT password is too long (max 63 characters).');
+  var sh = v('syslogHost');
+  if (sh.length>0 && !isValidHost(sh))
+    return fail(e, 'Syslog host must be a valid IP address or fully-qualified hostname (e.g. 192.168.1.10 or logs.local). Invalid value: "' + sh + '"');
+  var sp = parseInt(v('syslogPort'),10);
+  if (v('syslogPort') && (isNaN(sp)||sp<1||sp>65535))
+    return fail(e, 'Syslog port must be between 1 and 65535.');
+  var mPin = parseInt(v('moisturePin'),10);
+  var bPin = parseInt(v('batteryPin'),10);
+  var pPin = parseInt(v('sensorPowerPin'),10);
+  if (isNaN(mPin)||mPin<0||mPin>10) return fail(e, 'Moisture pin must be between 0 and 10.');
+  if (isNaN(bPin)||bPin<0||bPin>10) return fail(e, 'Battery pin must be between 0 and 10.');
+  if (isNaN(pPin)||pPin<-1||pPin>10) return fail(e, 'Sensor power pin must be between -1 and 10.');
+  if (mPin===bPin)
+    return fail(e, 'Moisture and battery pins must be different.');
+  if (pPin>=0 && (pPin===mPin||pPin===bPin))
+    return fail(e, 'Sensor power pin conflicts with another assigned pin.');
+}
+document.querySelector('form').addEventListener('submit', validateForm);
+</script>
+</body>
+</html>
