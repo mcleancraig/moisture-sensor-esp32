@@ -96,6 +96,13 @@ All other libraries (`WiFi`, `WebServer`, `DNSServer`, `Preferences`, `HTTPUpdat
 
 No configuration changes are needed before flashing — all settings are entered via the captive portal after first boot.
 
+**Editing the captive portal page:** the page is served gzip-compressed to save flash. Edit `captive-portal.html`, not `config_html_gz.h` (generated, do not hand-edit) — then regenerate before building:
+
+```bash
+python3 tools/gen_config_html.py
+./build.sh
+```
+
 ---
 
 ## First-time setup
