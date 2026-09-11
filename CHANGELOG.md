@@ -3,6 +3,11 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.0.4-b01] — 2026-09-11
+
+### Changed
+- **Captive portal served gzip-compressed** — the config page (`CONFIG_HTML`, 12.8KB) is now generated from `captive-portal.html` into two gzip-compressed variants (`config_html_gz.h`, via `tools/gen_config_html.py`) with the update-channel dropdown pre-selected at build time instead of via a runtime `String::replace()`. `handleRoot()` serves the precompiled bytes directly with `Content-Encoding: gzip`. Frees ~8.8KB of flash (sketch usage 99% → 98% of the 1.28MB partition) with no behavior change to the portal itself.
+
 ## [3.0.3] — 2026-09-11
 
 ### Fixed
