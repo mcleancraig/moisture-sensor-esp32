@@ -605,6 +605,7 @@ void buildDerivedConfig() {
 struct SyslogEntry {
   char msg[SYSLOG_LINE];
   char func[SYSLOG_FUNC];
+  unsigned long atMs;   // millis() when originally logged — see syslogSend()
 };
 
 static SyslogEntry syslogBuf[SYSLOG_LINES];
@@ -615,17 +616,24 @@ static IPAddress syslogIP;          // resolved once in syslogFlush(); used by s
 
 WiFiUDP syslogUdp;
 
-void syslogSend(const char* func, const char* msg) {
+void syslogSend(const char* func, const char* msg, unsigned long atMs) {
   char clean[SYSLOG_LINE];
   strlcpy(clean, msg, sizeof(clean));
   int len = strlen(clean);
   while (len > 0 && (clean[len-1] == '\n' || clean[len-1] == '\r')) clean[--len] = '\0';
   if (len == 0) return;
 
-  // RFC 3164 timestamp: "Jan  1 12:34:56" — falls back to epoch if NTP not yet synced
+  // RFC 3164 timestamp: "Jan  1 12:34:56" — falls back to epoch if NTP not
+  // yet synced. Back-dated to atMs (when the message was actually logged)
+  // rather than "now": syslogFlush() sends buffered pre-NTP messages in one
+  // burst after WiFi/NTP connects, so "now" can be seconds after the
+  // message was generated — without this every buffered message would get
+  // the same flush-time timestamp in Grafana.
   char timestamp[16];
   struct tm t;
-  if (getLocalTime(&t)) {
+  if (hasValidEpoch()) {
+    time_t msgEpoch = time(nullptr) - (time_t)((millis() - atMs) / 1000);
+    localtime_r(&msgEpoch, &t);
     strftime(timestamp, sizeof(timestamp), "%b %e %T", &t);
   } else {
     strlcpy(timestamp, "Jan  1 00:00:00", sizeof(timestamp));
@@ -635,8 +643,10 @@ void syslogSend(const char* func, const char* msg) {
   char packet[220];
   // RFC 3164: <PRI>TIMESTAMP HOSTNAME APP[FUNC]: MSG
   // facility=local0(16), severity=info(6) → priority 134
-  snprintf(packet, sizeof(packet), "<134>%s %s moisture-sensor-esp32[%s]: %s",
-    timestamp, hostname, func, clean);
+  // (@Xms) is millis()-since-boot, for sub-second function-to-function
+  // timing that RFC 3164's 1s-resolution TIMESTAMP can't give you.
+  snprintf(packet, sizeof(packet), "<134>%s %s moisture-sensor-esp32[%s]: (@%lums) %s",
+    timestamp, hostname, func, atMs, clean);
 
   // Use pre-resolved IPAddress — beginPacket(IPAddress) never blocks
   syslogUdp.beginPacket(syslogIP, cfg.syslogPort);
@@ -668,7 +678,7 @@ void syslogFlush() {
   int start = (syslogTotal >= SYSLOG_LINES) ? syslogHead : 0;
   for (int i = 0; i < count; i++) {
     int idx = (start + i) % SYSLOG_LINES;
-    syslogSend(syslogBuf[idx].func, syslogBuf[idx].msg);
+    syslogSend(syslogBuf[idx].func, syslogBuf[idx].msg, syslogBuf[idx].atMs);
     delay(2);
   }
   syslogHead  = 0;
@@ -677,12 +687,13 @@ void syslogFlush() {
 }
 
 void _logf(const char* func, const char* fmt, ...) {
+  unsigned long nowMs = millis();
   char line[512];
   va_list args;
   va_start(args, fmt);
   vsnprintf(line, sizeof(line), fmt, args);
   va_end(args);
-  Serial.printf("[%s] %s", func, line);
+  Serial.printf("[%s] (@%lums) %s", func, nowMs, line);
 
   // Skip syslog if not configured, or if DNS resolution failed this cycle
   // (syslogIP == 0 means either not yet resolved or resolution failed)
@@ -690,10 +701,11 @@ void _logf(const char* func, const char* fmt, ...) {
   if (syslogReady && (uint32_t)syslogIP == 0) return;
 
   if (syslogReady) {
-    syslogSend(func, line);
+    syslogSend(func, line, nowMs);
   } else {
     strlcpy(syslogBuf[syslogHead].msg,  line, SYSLOG_LINE);
     strlcpy(syslogBuf[syslogHead].func, func, SYSLOG_FUNC);
+    syslogBuf[syslogHead].atMs = nowMs;
     syslogHead = (syslogHead + 1) % SYSLOG_LINES;
     syslogTotal++;
   }
@@ -2194,19 +2206,6 @@ void setup() {
   logf(  "║   Firmware v%-12s ║\n", FIRMWARE_VERSION);
   logf(  "╚══════════════════════════╝\n");
 
-  // ── Load config first so syslog server address is available ──
-  loadConfig();
-  validateConfig();
-  checkFotaBootHealth();
-
-  // ── Early sensor power-on for parallel stabilization ──
-  if (configLoaded && cfg.sensorPowerPin >= 0) {
-    pinMode(cfg.sensorPowerPin, OUTPUT);
-    digitalWrite(cfg.sensorPowerPin, HIGH);
-    sensorPowerOnTime = millis();
-    logf("Power     — sensorPowerPin GPIO%d set HIGH (stabilizing in parallel)\n", cfg.sensorPowerPin);
-  }
-
   // ── Wake / reset reason ───────────────────────────────────
   esp_reset_reason_t resetReason = esp_reset_reason();
   if (resetReason != ESP_RST_DEEPSLEEP) {
@@ -2233,6 +2232,19 @@ void setup() {
       logf("Wake      — cold boot or unexpected (cause=%d)\n",
            (int)esp_sleep_get_wakeup_cause());
       break;
+  }
+
+  // ── Load config first so syslog server address is available ──
+  loadConfig();
+  validateConfig();
+  checkFotaBootHealth();
+
+  // ── Early sensor power-on for parallel stabilization ──
+  if (configLoaded && cfg.sensorPowerPin >= 0) {
+    pinMode(cfg.sensorPowerPin, OUTPUT);
+    digitalWrite(cfg.sensorPowerPin, HIGH);
+    sensorPowerOnTime = millis();
+    logf("Power     — sensorPowerPin GPIO%d set HIGH (stabilizing in parallel)\n", cfg.sensorPowerPin);
   }
 
   // ── Boot button check — hold for 3s to force reconfiguration ──
