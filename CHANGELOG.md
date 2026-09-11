@@ -3,7 +3,7 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [3.0.3-b01] — 2026-08-17
+## [3.0.3] — 2026-09-11
 
 ### Fixed
 - **HA discovery republished on every wake** — the safety-net threshold was `> 2h`, exactly equal to the default `SLEEP_MINUTES` of 120, so elapsed time always exceeded it and the throttle never fired. Roughly 20 retained discovery payloads were being republished every wake instead of acting as an occasional recovery mechanism, and the `Discovery — skipped` log line was effectively unreachable. Now governed by `DISCOVERY_REPUBLISH_S` (24h), which stays clear of the longest configurable `sleepMinutes` (720).
