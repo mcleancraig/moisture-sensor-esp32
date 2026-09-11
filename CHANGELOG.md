@@ -3,12 +3,19 @@
 All notable changes to moisture-sensor-esp32 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [3.0.4-b02] — 2026-09-11
+## [3.0.4-b03] — 2026-09-11
+
+### Added
+- **`(@Xms)` millis()-since-boot prefix on every log line** — Serial and syslog messages now read `[func] (@1234ms) message`, giving direct per-function timing without relying on Grafana ingestion timestamps.
+
+### Fixed
+- **Buffered syslog messages carried the wrong timestamp** — `syslogFlush()` sends every pre-NTP boot message in one burst after WiFi/NTP connects, and `syslogSend()` stamped each with the wall-clock time *at send*, so a wake that took several real seconds could show as a sub-second cluster in Grafana. `syslogSend()` now back-dates each message's RFC 3164 timestamp using its stored `millis()`-at-log-time against the delta to "now."
 
 ### Changed
+- **Boot log ordering** — `setup()` now logs the Boot/Wake-reason lines before writing `sensorPowerPin` HIGH, matching actual causality. The pin write itself still happens exactly as early as before — only the already-fast reset-reason/wake-cause reads moved — so parallel sensor-stabilization timing is unaffected.
 - **Captive portal served gzip-compressed** — the config page (`CONFIG_HTML`, 12.8KB) is now generated from `captive-portal.html` into two gzip-compressed variants (`config_html_gz.h`, via `tools/gen_config_html.py`) with the update-channel dropdown pre-selected at build time instead of via a runtime `String::replace()`. `handleRoot()` serves the precompiled bytes directly with `Content-Encoding: gzip`. Frees ~8.8KB of flash with no behavior change to the portal itself.
 - **FOTA trusts only GitHub's actual root CAs, not the full default bundle** — `SecureClient::enableDefaultBundle()` linked in the ESP32 core's full ~200-CA certificate bundle (68,983 bytes) to validate HTTPS connections that only ever reach two GitHub hosts. Replaced with `WiFiClientSecure::setCACert()` trusting just the two roots those hosts' chains actually terminate at: ISRG Root X1 (Let's Encrypt, for the release-asset CDN) and USERTrust ECC Certification Authority (for github.com/api.github.com). Both chains verified end-to-end against these exact roots. Frees ~68.2KB.
-- **Combined:** sketch flash usage 1,304,434 → 1,227,150 bytes (99% → 93% of the 1.28MB partition), ~77.3KB freed.
+- **Combined:** sketch flash usage 1,304,434 → 1,227,300 bytes (99% → 93% of the 1.28MB partition), ~77.1KB freed.
 
 ### Upgrade notes
 - FOTA now trusts a narrower set of root CAs (2, scoped to GitHub's current infrastructure) instead of the full default bundle (~200). If GitHub changes CA or CDN provider, FOTA will fail closed (safe — connections are simply refused, no silent insecurity) until affected sensors are reflashed with an updated root. Recommend confirming a real FOTA cycle completes successfully on a physical sensor before promoting this beta to stable.
