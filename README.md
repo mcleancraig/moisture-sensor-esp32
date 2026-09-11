@@ -12,13 +12,12 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 - Battery voltage and percentage monitoring
 - WiFi provisioning via captive portal — no hardcoded credentials
 - Static or DHCP IP addressing, with configurable gateway, subnet and DNS
-- Home Assistant MQTT autodiscovery — sensors appear automatically, autodiscovery republishes every 2 hours to recover from broker restarts
+- Home Assistant MQTT autodiscovery — sensors appear automatically, autodiscovery republishes daily to recover from broker restarts
 - Automatic firmware updates via FOTA from GitHub Releases, with rollback guard after 3 failed boots
 - Beta FOTA channel — switch individual sensors between stable and beta firmware streams via Home Assistant
 - Sensor power-gating — GPIO cuts HW-390 power during deep sleep, eliminating standby drain
 - Syslog — structured UDP syslog to a configurable host for centralised logging
 - Boot button reconfiguration — no reflashing needed to change settings
-- Reed switch restart — hold magnet to restart without opening enclosure
 - MQTT command support — send `reset` remotely via retained message
 - Deep sleep between readings — configurable interval (default 120 minutes) for long battery life
 - First boot delay — skips moisture on first wake (default 15 minutes) so an open-air reading isn't sent while planting
@@ -57,8 +56,6 @@ Built around the Seeed XIAO ESP32-C6, configured entirely via a captive portal w
 HW-390 VCC  ── XIAO D4 (GPIO4)    ← power-gated (see note)
 HW-390 GND  ── GND
 HW-390 AOUT ── XIAO A1 (GPIO1)
-
-Reed switch ── GPIO3 ── GND  (normally open, INPUT_PULLUP)
 ```
 
 After first boot, set **Sensor Power Pin** to `4` in the config portal. The firmware drives D4 HIGH just before the ADC read and LOW before sleeping, so the HW-390 draws no current during deep sleep. Any free GPIO 0–10 can be used; D4 is recommended as it is otherwise unused.
@@ -141,10 +138,6 @@ If the portal is not used within 10 minutes it will close, the sensor sleeps for
 3. Release the button — the sensor starts the configuration portal
 
 A brief press under 3 seconds is ignored — normal boot continues.
-
-### Reed switch (no enclosure access needed)
-
-Hold a magnet against the outside of the enclosure for 3 seconds — the sensor restarts. To trigger a full config reset without physical access, use the MQTT command below.
 
 ### MQTT command (fully remote)
 
@@ -270,11 +263,50 @@ The `fw_version` field in the MQTT payload confirms the running firmware version
 **Tagging and releasing from the command line:**
 
 ```bash
-git tag -a v2.1.0 -m "v2.1.0 release notes here"
-git push origin v2.1.0
+git tag -a v3.0.3 -m "v3.0.3 release notes here"
+git push origin v3.0.3
 ```
 
-Then on GitHub go to **Releases → Draft a new release**, select the tag, and attach `firmware.bin` and `version.txt`.
+Then on GitHub go to **Releases → Draft a new release**, select the tag, and attach `moisture-sensor-esp32.ino.bin` and `version.txt`.
+
+---
+
+## Beta releases
+
+Riskier changes can be shipped to a subset of sensors first via the **beta FOTA channel** before promoting to the whole fleet. The two channels read different sources, which is why their release assets differ:
+
+| Channel | Reads | Assets required |
+|---|---|---|
+| `stable` | `/releases/latest/download/version.txt`, then the binary from the same release | `moisture-sensor-esp32.ino.bin` **and** `version.txt` |
+| `beta` | `tag_name` of the newest release via the GitHub API, including pre-releases | `moisture-sensor-esp32.ino.bin` only |
+
+**To cut a beta:**
+
+1. On the version branch (not `main`), set `FIRMWARE_VERSION` to `X.Y.Z-bNN` — e.g. `3.0.3-b01`; bump `NN` for a respin
+2. Tag and push: `git tag -a v3.0.3-b01 -m "..." && git push origin v3.0.3-b01`
+3. Draft a release from that tag, tick **Set as a pre-release**, and attach the `.bin`. No `version.txt` needed — the beta channel never reads it, and `/releases/latest` skips pre-releases so stable sensors are unaffected
+4. Sensors with **Update Channel** set to `beta` pick it up on their next wake
+
+**To promote a confirmed beta to stable:**
+
+1. On the version branch, drop the `-bNN` suffix from `FIRMWARE_VERSION`
+2. Finalise the `CHANGELOG.md` entry
+3. Open the final PR from the version branch into `main` and merge
+4. Tag and release as normal (`vX.Y.Z`, *not* a pre-release), attaching both the `.bin` and `version.txt`
+
+`isNewerVersion()` treats a stable build as newer than a beta of the same version, and a higher `-bNN` as newer than a lower one, so promoting to stable is picked up automatically and switching a sensor's channel back and forth needs no version bump.
+
+**Attach the binary before publishing, not after.** The beta channel bypasses the 24 h FOTA throttle, so a published pre-release with no `.bin` attached leaves beta sensors retrying a 404 on *every* wake.
+
+**Verify the binary before uploading** — confirm the version baked into it matches the tag:
+
+```bash
+grep -a -o '3\.0\.3[^"]*' build/moisture-sensor-esp32.ino.bin | sort -u
+```
+
+A mismatch here means every sensor will download the "new" firmware, boot into the old version, see an update available again, and reflash indefinitely.
+
+**Beta sensors park when no pre-release is newest.** If the most recent release is a stable one, beta-channel sensors log `FOTA — no beta release available yet, staying put` and hold their current build rather than moving to the stable. To bring them back in line with the fleet, switch their **Update Channel** to `stable`.
 
 ---
 
@@ -292,8 +324,12 @@ The sensor buffers log messages during its wake cycle and flushes them over UDP 
 
 **Useful log patterns:**
 - `FOTA      — ROLLED BACK` — firmware rollback guard fired; investigate what changed
-- `Discovery — skipped (3.0.2, NNm ago)` — discovery republish throttled; expected behaviour
+- `Discovery — skipped (3.0.3, NNm ago)` — discovery republish throttled; expected on most wakes
 - `FOTA      — forced check` — triggered by the Force check HA button
+- `WiFi      — connected, IP: … (312ms, cached)` — association time, and whether the cached BSSID or a full scan was used. A sensor logging `full scan` every wake is not benefiting from the connection cache
+- `WiFi      — fast connect failed, retrying full scan connect` — the cached AP moved channel or went away; self-corrects, but persistent occurrences suggest an unstable AP or roaming between mesh nodes
+- `Sleep     — awake NNNNms this wake` — total awake duration. The single most useful number for tracking per-wake energy use across the fleet
+- `MQTT      — listen window closed after NNNms (N message(s) this wake)` — confirms remote commands are arriving inside the listen window
 
 ---
 
@@ -324,6 +360,8 @@ Based on a 120-minute sleep cycle (default) and 2000mAh cell:
 
 Estimated runtime: **5+ months** per charge. Actual runtime depends on WiFi signal strength, temperature, and cell quality.
 
+The awake duration above is an estimate. Since v3.0.3 the real figure is logged every wake as `Sleep — awake NNNNms this wake`, so per-sensor energy use can be measured from syslog rather than assumed — worth checking against this table before making further power optimisations. Note that at a 120-minute interval, standby losses (deep sleep current, the 400 kΩ battery divider, regulator quiescent draw and cell self-discharge) are a substantial share of the budget, so reducing awake time has diminishing returns compared with cutting standby draw.
+
 The battery percentage uses a piecewise linear interpolation of a real 18650 discharge curve, giving accurate readings across the full voltage range rather than fixed steps.
 
 ---
@@ -333,7 +371,7 @@ The battery percentage uses a piecewise linear interpolation of a real 18650 dis
 To completely clear all configuration and return to first-boot state:
 
 - **Via MQTT:** send a retained `reset` command (see Reconfiguring a deployed sensor above) — no physical access needed
-- **Via USB:** flash the `clear-config` sketch in the `clear-config/` folder, then re-flash the main sketch
+- **Via boot button:** power the sensor on while holding the boot button for 3 seconds — the firmware clears NVS and starts the configuration portal. No reflashing required
 
 ---
 
@@ -362,8 +400,12 @@ mosquitto_sub -h localhost -t "garden/#" -v -u YOUR_USER -P YOUR_PASSWORD
 
 **FOTA update not applying**
 - Ensure the sensor has internet access — verify DNS is configured correctly in the portal
-- Confirm `version.txt` is attached to the latest GitHub release and contains the correct version string with no trailing whitespace or newlines
-- Check the `fw_version` field in the MQTT payload to confirm what version is currently running
+- Check the `fw_version` field in the MQTT payload to confirm what version is currently running, and the sensor's **Update Channel** to confirm which stream it is following
+- *Stable channel:* confirm `version.txt` is attached to the latest GitHub release and contains the correct version string with no leading `v` and no trailing whitespace or newlines. A leading `v` will not parse and the sensor will never update
+- *Beta channel:* confirm the newest release is marked as a pre-release. If the newest release is a stable one, beta sensors deliberately stay put — see [Beta releases](#beta-releases)
+
+**Sensor reflashing on every wake**
+The version baked into the released binary does not match the release it is attached to, so the sensor downloads it, boots reporting the old version, and immediately sees an update available again. Check syslog for a repeating `FOTA — update available: X -> Y` where `X` never changes, then verify the release asset as described under [Beta releases](#beta-releases) and re-upload a correctly built binary. Sensors recover on their own once the corrected asset is in place.
 
 **Moisture reading stuck at 0% or 100%**
 Recalibrate — the `DRY_MV` and `WET_MV` values in the firmware need to match your specific sensor unit. Check `moisture_raw_mv` in the MQTT payload and compare against your calibration readings.
