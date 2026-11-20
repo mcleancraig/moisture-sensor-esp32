@@ -251,13 +251,14 @@ The device card also shows the firmware version (`sw_version`) on the device inf
 
 On each wake the sensor checks GitHub Releases for a newer firmware version and updates itself automatically. No IDE or physical access needed.
 
-**To release a firmware update:**
+**To release a firmware update:** releases are built and published by GitHub Actions (`.github/workflows/build-release.yml`).
 
-1. Bump `FIRMWARE_VERSION` in the sketch
-2. Run `build.sh` to compile — output is `build/moisture-sensor-esp32.ino.bin`
-3. Create a plain text file `version.txt` containing just the new version number (e.g. `3.0.2`) with no trailing newline
-4. Create a new GitHub release tagged `vX.X.X`, attach both `moisture-sensor-esp32.ino.bin` and `version.txt` as release assets
-5. Every sensor will pick up the update automatically on its next wake cycle
+1. Bump `FIRMWARE_VERSION` in the sketch and merge to the version branch (or `main` for a stable release)
+2. Tag and push, e.g. `git tag -a v3.0.3 -m "..." && git push origin v3.0.3`
+3. CI compiles, checks the tag equals `FIRMWARE_VERSION` and that the version is baked into the `.bin`, then creates the release with `moisture-sensor-esp32.ino.bin` (plus `version.txt` for stable) attached in one step
+4. Every sensor will pick up the update automatically on its next wake cycle
+
+Pull requests get a compile-only check. `build.sh` is still available for local builds and flashing.
 
 The `fw_version` field in the MQTT payload confirms the running firmware version. If an update fails the sensor continues operating on the existing firmware and retries on the next wake.
 
@@ -266,15 +267,6 @@ The `fw_version` field in the MQTT payload confirms the running firmware version
 **Update Channel:** each sensor can independently follow the `stable` channel (GitHub Releases marked *Latest*) or the `beta` channel (most recent release including pre-releases). Switch a sensor by changing its **Update Channel** entity in Home Assistant — the new value is written to NVS on next wake. Default is `stable`.
 
 **Force check on next wake:** pressing the **Force check on next wake** button in HA publishes a retained `1` to `garden/sensorN/update`. The sensor reads this on its next wake, clears the retained message, and runs a FOTA check immediately regardless of the 24 h throttle.
-
-**Tagging and releasing from the command line:**
-
-```bash
-git tag -a v3.0.3 -m "v3.0.3 release notes here"
-git push origin v3.0.3
-```
-
-Then on GitHub go to **Releases → Draft a new release**, select the tag, and attach `moisture-sensor-esp32.ino.bin` and `version.txt`.
 
 ---
 
@@ -291,7 +283,7 @@ Riskier changes can be shipped to a subset of sensors first via the **beta FOTA 
 
 1. On the version branch (not `main`), set `FIRMWARE_VERSION` to `X.Y.Z-bNN` — e.g. `3.0.3-b01`; bump `NN` for a respin
 2. Tag and push: `git tag -a v3.0.3-b01 -m "..." && git push origin v3.0.3-b01`
-3. Draft a release from that tag, tick **Set as a pre-release**, and attach the `.bin`. No `version.txt` needed — the beta channel never reads it, and `/releases/latest` skips pre-releases so stable sensors are unaffected
+3. CI builds and publishes it as a **pre-release** (never Latest) with the `.bin` attached. No `version.txt` is made — the beta channel never reads it, and `/releases/latest` skips pre-releases so stable sensors are unaffected
 4. Sensors with **Update Channel** set to `beta` pick it up on their next wake
 
 **To promote a confirmed beta to stable:**
@@ -299,13 +291,13 @@ Riskier changes can be shipped to a subset of sensors first via the **beta FOTA 
 1. On the version branch, drop the `-bNN` suffix from `FIRMWARE_VERSION`
 2. Finalise the `CHANGELOG.md` entry
 3. Open the final PR from the version branch into `main` and merge
-4. Tag and release as normal (`vX.Y.Z`, *not* a pre-release), attaching both the `.bin` and `version.txt`
+4. Tag `vX.Y.Z` (no `-b`) and push; CI publishes a normal release, marked Latest, with both the `.bin` and `version.txt`
 
 `isNewerVersion()` treats a stable build as newer than a beta of the same version, and a higher `-bNN` as newer than a lower one, so promoting to stable is picked up automatically and switching a sensor's channel back and forth needs no version bump.
 
-**Attach the binary before publishing, not after.** The beta channel bypasses the 24 h FOTA throttle, so a published pre-release with no `.bin` attached leaves beta sensors retrying a 404 on *every* wake.
+**The binary is attached at creation.** CI does this in a single `gh release create` step, which matters because the beta channel bypasses the 24 h FOTA throttle, so a published pre-release with no `.bin` attached leaves beta sensors retrying a 404 on *every* wake.
 
-**Verify the binary before uploading** — confirm the version baked into it matches the tag:
+**Version check** — CI runs this automatically; to do it by hand, confirm the version baked into the binary matches the tag:
 
 ```bash
 grep -a -o '3\.0\.3[^"]*' build/moisture-sensor-esp32.ino.bin | sort -u
