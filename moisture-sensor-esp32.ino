@@ -1,5 +1,5 @@
 #include <WiFi.h>
-#include <WiFiUDP.h>
+#include <WiFiUdp.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
