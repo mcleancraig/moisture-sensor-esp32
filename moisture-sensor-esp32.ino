@@ -7,6 +7,7 @@
 #include <HTTPUpdate.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
+#include "esp_sntp.h"
 #include "esp_mac.h"
 #include "esp_sleep.h"
 #include "esp_ota_ops.h"
@@ -1292,37 +1293,45 @@ static bool hasValidEpoch() {
   return (uint32_t)time(nullptr) > 1700000000UL;  // after Nov 2023
 }
 
+// Resync interval. RTC slow clock drifts ~0.8% (~11 min/day) uncalibrated, so
+// 4 h keeps worst-case error to ~2 min. Cost is one SNTP exchange (~0.3-1 s,
+// WiFi already up) every 8th 30-minute wake.
+const time_t NTP_RESYNC_S = 4 * 3600;
+
 bool syncNTP() {
-  // The ESP32 RTC keeps running during deep sleep, so the time set by a
-  // previous NTP sync remains valid on wake. Skip the sync (and its 0-10s
-  // wait) unless the clock looks wrong or 24 hours have elapsed since the
-  // last sync (to correct RTC drift, ~50-100ppm = ~5s/day at most).
   struct tm t;
-  bool validRtc = getLocalTime(&t) && (t.tm_year + 1900 >= 2024);
+  bool validRtc = getLocalTime(&t, 0) && (t.tm_year + 1900 >= 2024);
   bool syncDue  = !validRtc
                || !hasValidEpoch()
-               || (time(nullptr) - lastNtpSync) >= 86400;
+               || (time(nullptr) - lastNtpSync) >= NTP_RESYNC_S;
 
   if (!syncDue) {
-    logf("NTP       — skipped (RTC valid, last sync %ldh ago)\n",
-         (long)(time(nullptr) - lastNtpSync) / 3600);
+    logf("NTP       — skipped (RTC valid, last sync %ldmin ago)\n",
+         (long)(time(nullptr) - lastNtpSync) / 60);
     return true;
   }
 
+  // getLocalTime() returns true immediately when the RTC already holds a
+  // plausible time, so waiting on it never waits for SNTP and the old code
+  // only "synced" on cold boot. Wait for the SNTP completion status instead.
+  esp_sntp_stop();
+  sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
   configTime(GMT_OFFSET_S, DST_OFFSET_S, NTP_SERVER);
   logf("NTP       — syncing\n");
   unsigned long start = millis();
-  while (!getLocalTime(&t)) {
+  while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) {
     if (millis() - start >= NTP_TIMEOUT_MS) {
-      logf("NTP       — timed out after 10s, timestamp will be omitted\n");
+      // lastNtpSync not updated, so the next wake retries.
+      logf("NTP       — timed out after 10s, keeping RTC time (%s)\n",
+           validRtc ? "valid" : "timestamp will be omitted");
       return false;
     }
-    delay(500);
-    Serial.print(".");
+    delay(100);
   }
-  Serial.println();
+  getLocalTime(&t, 0);
   lastNtpSync = time(nullptr);
-  logf("NTP       — synced: %04d-%02d-%02dT%02d:%02d:%02dZ\n",
+  logf("NTP       — synced in %lums: %04d-%02d-%02dT%02d:%02d:%02dZ\n",
+    millis() - start,
     t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
     t.tm_hour, t.tm_min, t.tm_sec);
   return true;
