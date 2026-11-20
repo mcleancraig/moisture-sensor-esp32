@@ -1,0 +1,81 @@
+name: build-release
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  FQBN: esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc
+  # Core version last confirmed on Craig's Mac (3.3.10, see git history). Bump deliberately.
+  ESP32_CORE_VERSION: "3.3.10"
+  BIN: moisture-sensor-esp32.ino.bin
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: arduino/setup-arduino-cli@b3cda96fddef6af6c56b4c5efb5c47e2357935db # v2.1.0
+
+      - name: Install ESP32 core and libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@${ESP32_CORE_VERSION}"
+          arduino-cli lib install PubSubClient
+
+      - name: Compile
+        run: |
+          arduino-cli compile --fqbn "$FQBN" --output-dir build/ moisture-sensor-esp32.ino
+          ls -l "build/$BIN"
+
+      - name: Verify tag matches firmware version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          fw="$(sed -n 's/^#define FIRMWARE_VERSION "\(.*\)"$/\1/p' moisture-sensor-esp32.ino)"
+          echo "tag=$tag FIRMWARE_VERSION=$fw"
+          [ -n "$fw" ] && [ "$tag" = "$fw" ] || { echo "::error::tag v$tag does not match FIRMWARE_VERSION $fw"; exit 1; }
+          grep -a -F -q "$tag" "build/$BIN" || { echo "::error::version $tag not found in $BIN"; exit 1; }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: firmware
+          path: build/moisture-sensor-esp32.ino.bin
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: firmware
+
+      - name: Create release with assets attached
+        run: |
+          tag="$GITHUB_REF_NAME"
+          ls -l "$BIN"
+          if [[ "$tag" == *-b* ]]; then
+            # Beta: pre-release, never Latest. Beta channel reads only the .bin.
+            gh release create "$tag" "$BIN" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$tag" --generate-notes --prerelease --latest=false
+          else
+            # Stable: version.txt = bare version, no leading v, no trailing newline.
+            printf '%s' "${tag#v}" > version.txt
+            gh release create "$tag" "$BIN" version.txt --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$tag" --generate-notes --latest
+          fi
